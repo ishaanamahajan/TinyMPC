@@ -32,6 +32,13 @@ tinyVector project_soc(tinyVector s, float mu);
  * @return Projection of z onto the hyperplane
  */
 tinyVector project_hyperplane(const tinyVector& z, const tinyVector& a, tinytype b);
+
+/**
+ * Project a symmetric matrix onto the PSD cone
+ * @param S symmetric matrix (not necessarily PSD)
+ * @return closest PSD matrix in Frobenius norm
+ */
+tinyMatrix project_psd(const tinyMatrix& S);
 #ifdef __cplusplus
 }
 #endif

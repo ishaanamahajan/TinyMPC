@@ -56,6 +56,8 @@ int main()
     
     // Update whichever settings we'd like
     solver->settings->max_iter = 100;
+    // Enable state-only PSD constraints for testing
+    solver->settings->en_state_psd = 1;
     
     // Alias solver->work for brevity
     TinyWorkspace *work = solver->work;

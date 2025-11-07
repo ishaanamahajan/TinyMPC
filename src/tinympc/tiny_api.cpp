@@ -114,6 +114,13 @@ int tiny_setup(TinySolver** solverp,
     work->gl_tv = tinyMatrix::Zero(nx, N);
     work->yl_tv = tinyMatrix::Zero(nu, N-1);
 
+    // PSD (state-only) slack and dual variables (scaffolding)
+    work->vpsd = tinyMatrix::Zero(nx, N);
+    work->vpsdnew = tinyMatrix::Zero(nx, N);
+    work->gpsd = tinyMatrix::Zero(nx, N);
+    work->XXpsd = tinyMatrix::Zero(nx*nx, N);
+    work->XXpsdnew = tinyMatrix::Zero(nx*nx, N);
+
     work->Q = (Q + rho * tinyMatrix::Identity(nx, nx)).diagonal();
     work->R = (R + rho * tinyMatrix::Identity(nu, nu)).diagonal();
     work->Adyn = Adyn; // State transition matrix
@@ -407,6 +414,8 @@ int tiny_update_settings(TinySettings* settings, tinytype abs_pri_tol, tinytype 
     settings->en_input_linear = en_input_linear;
     settings->en_tv_state_linear = en_tv_state_linear;
     settings->en_tv_input_linear = en_tv_input_linear;
+    settings->en_state_psd = TINY_DEFAULT_EN_STATE_PSD;
+    settings->en_input_psd = TINY_DEFAULT_EN_INPUT_PSD;
     return 0;
 }
 
@@ -429,22 +438,14 @@ int tiny_set_default_settings(TinySettings* settings) {
     settings->en_input_linear = TINY_DEFAULT_EN_INPUT_LINEAR;
     settings->en_tv_state_linear = TINY_DEFAULT_EN_TV_STATE_LINEAR;
     settings->en_tv_input_linear = TINY_DEFAULT_EN_TV_INPUT_LINEAR;
-    
-<<<<<<< HEAD
+    settings->en_state_psd = TINY_DEFAULT_EN_STATE_PSD;
+    settings->en_input_psd = TINY_DEFAULT_EN_INPUT_PSD;
+
     // Default adaptive rho settings
     settings->adaptive_rho = 0;                // 1 - Enabled, 0 - Disabled
     settings->adaptive_rho_min = 1.0;          // Minimum rho value
     settings->adaptive_rho_max = 100.0;        // Maximum rho value
     settings->adaptive_rho_enable_clipping = 1; // 1 - Enable clipping, 0 - Disable clipping
-=======
-    // Initialize adaptive rho settings
-    // NOTE : Adaptive rho currently supports only quadrotor system
-    settings->adaptive_rho = 0;  // Disabled by default
-    settings->adaptive_rho_min = 1.0;
-    settings->adaptive_rho_max = 100.0;
-    settings->adaptive_rho_enable_clipping = 1;
-
->>>>>>> 1ca4d7d4e8fa19e0d4659b81c934f83460bb7f76
     return 0;
 }
 

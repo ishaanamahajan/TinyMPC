@@ -14,3 +14,6 @@
 #define TINY_DEFAULT_EN_INPUT_LINEAR    (0)
 #define TINY_DEFAULT_EN_TV_STATE_LINEAR (0)
 #define TINY_DEFAULT_EN_TV_INPUT_LINEAR (0)
+// PSD (semidefinite) constraints (scaffolding; disabled by default)
+#define TINY_DEFAULT_EN_STATE_PSD       (0)
+#define TINY_DEFAULT_EN_INPUT_PSD       (0)

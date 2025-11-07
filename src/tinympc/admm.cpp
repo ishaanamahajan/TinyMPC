@@ -3,6 +3,8 @@
 #include "admm.hpp"
 #include "rho_benchmark.hpp"    
 
+#include <Eigen/Eigenvalues>
+
 #define DEBUG_MODULE "TINYALG"
 
 extern "C" {
@@ -70,6 +72,22 @@ tinyVector project_soc(tinyVector s, float mu) {
 tinyVector project_hyperplane(const tinyVector& z, const tinyVector& a, tinytype b) {
     tinytype dist = (a.dot(z) - b) / a.squaredNorm();
     return z - dist * a;
+}
+
+/**
+ * Project a symmetric matrix onto the PSD cone using eigenvalue clipping
+ * Π_SDP(S) = V*max(Λ,0)*V'
+ */
+tinyMatrix project_psd(const tinyMatrix& S) {
+    tinyMatrix H = 0.5 * (S + S.transpose());
+    Eigen::SelfAdjointEigenSolver<tinyMatrix> es(H);
+    // In rare cases, the solver may fail; return H as a fallback
+    if (es.info() != Eigen::Success) {
+        return H;
+    }
+    tinyMatrix V = es.eigenvectors();
+    tinyMatrix Dp = es.eigenvalues().cwiseMax(0).asDiagonal();
+    return V * Dp * V.transpose();
 }
 
 /**
@@ -209,6 +227,53 @@ void update_slack(TinySolver *solver)
             }
         }
     }
+
+    // PSD (state-only) constraints: project [1 y^T; y XX] onto PSD with S(0,0)=1
+    if (solver->settings->en_state_psd) {
+        int nx = solver->work->nx;
+        int N = solver->work->N;
+        int nsp = 1 + nx; // size of PSD block
+
+        // y copy for consensus: y = x + gpsd
+        solver->work->vpsdnew = solver->work->x + solver->work->gpsd;
+
+        for (int i = 0; i < N; i++) {
+            tinyVector y = solver->work->vpsdnew.col(i);
+
+            // Retrieve XX (nx x nx) from vectorized storage (column-major vec)
+            tinyMatrix XX(nx, nx);
+            for (int c = 0; c < nx; ++c) {
+                for (int r = 0; r < nx; ++r) {
+                    int idx = r + nx * c; // column-major vec index
+                    XX(r, c) = solver->work->XXpsd(idx, i);
+                }
+            }
+
+            // Build symmetric block matrix S
+            tinyMatrix S = tinyMatrix::Zero(nsp, nsp);
+            S(0, 0) = 1.0; // enforce top-left 1 before projection
+            S.block(0, 1, 1, nx) = y.transpose();
+            S.block(1, 0, nx, 1) = y;
+            tinyMatrix XXsym = 0.5 * (XX + XX.transpose());
+            S.block(1, 1, nx, nx) = XXsym;
+            S = 0.5 * (S + S.transpose()); // ensure exact symmetry
+
+            // Project onto PSD cone
+            tinyMatrix Sproj = project_psd(S);
+            // Re-enforce the affine constraint S(0,0) = 1
+            Sproj(0, 0) = 1.0;
+
+            // Extract projected y and XX back to slack variables
+            solver->work->vpsdnew.col(i) = Sproj.block(1, 0, nx, 1);
+            tinyMatrix XXproj = Sproj.block(1, 1, nx, nx);
+            for (int c = 0; c < nx; ++c) {
+                for (int r = 0; r < nx; ++r) {
+                    int idx = r + nx * c;
+                    solver->work->XXpsdnew(idx, i) = XXproj(r, c);
+                }
+            }
+        }
+    }
     
 }
 
@@ -253,6 +318,11 @@ void update_dual(TinySolver *solver)
     if (solver->settings->en_tv_input_linear) {
         solver->work->yl_tv = solver->work->yl_tv + solver->work->u - solver->work->zlnew_tv;
     }
+
+    // Update PSD (state-only) dual variables
+    if (solver->settings->en_state_psd) {
+        solver->work->gpsd = solver->work->gpsd + solver->work->x - solver->work->vpsdnew;
+    }
 }
 
 /**
@@ -273,6 +343,9 @@ void update_linear_cost(TinySolver *solver)
     }
     if (solver->settings->en_tv_state_linear) {
         (solver->work->q).noalias() -= solver->cache->rho * (solver->work->vlnew_tv - solver->work->gl_tv);
+    }
+    if (solver->settings->en_state_psd) {
+        (solver->work->q).noalias() -= solver->cache->rho * (solver->work->vpsdnew - solver->work->gpsd);
     }
 
     // Update input cost terms
@@ -300,6 +373,9 @@ void update_linear_cost(TinySolver *solver)
     }
     if (solver->settings->en_tv_state_linear) {
         solver->work->p.col(solver->work->N - 1) -= solver->cache->rho * (solver->work->vlnew_tv.col(solver->work->N - 1) - solver->work->gl_tv.col(solver->work->N - 1));
+    }
+    if (solver->settings->en_state_psd) {
+        solver->work->p.col(solver->work->N - 1) -= solver->cache->rho * (solver->work->vpsdnew.col(solver->work->N - 1) - solver->work->gpsd.col(solver->work->N - 1));
     }
 }
 
@@ -375,6 +451,25 @@ int solve(TinySolver *solver)
         solver->work->zlnew_tv = solver->work->u;
     }
 
+    // Initialize PSD (state-only) slack variables if needed
+    if (solver->settings->en_state_psd) {
+        solver->work->vpsdnew = solver->work->x;
+        // Initialize XXpsdnew with outer products of x (heuristic)
+        int nx = solver->work->nx;
+        int N = solver->work->N;
+        for (int i = 0; i < N; ++i) {
+            tinyMatrix XX = solver->work->x.col(i) * solver->work->x.col(i).transpose();
+            for (int c = 0; c < nx; ++c) {
+                for (int r = 0; r < nx; ++r) {
+                    int idx = r + nx * c; // column-major vec index
+                    solver->work->XXpsdnew(idx, i) = XX(r, c);
+                }
+            }
+        }
+        // Start XXpsd with the same initial values
+        solver->work->XXpsd = solver->work->XXpsdnew;
+    }
+
     for (int i = 0; i < solver->settings->max_iter; i++)
     {
         // Update linear control cost terms using reference trajectory, duals, and slack variables
@@ -393,19 +488,6 @@ int solve(TinySolver *solver)
 
         solver->work->iter += 1;
 
-<<<<<<< HEAD
-
-        if (solver->settings->adaptive_rho) {
-
-            // Calculate residuals for adaptive rho
-            tinytype pri_res_input = (solver->work->u - solver->work->znew).cwiseAbs().maxCoeff();
-            tinytype pri_res_state = (solver->work->x - solver->work->vnew).cwiseAbs().maxCoeff();
-            tinytype dua_res_input = solver->cache->rho * (solver->work->znew - z_prev).cwiseAbs().maxCoeff();
-            tinytype dua_res_state = solver->cache->rho * (solver->work->vnew - v_prev).cwiseAbs().maxCoeff();
-
-            // Update rho every 5 iterations
-            if (i> 0 && i % 5 == 0) {
-=======
         // Handle adaptive rho if enabled
         if (solver->settings->adaptive_rho) {
             // Calculate residuals for adaptive rho
@@ -416,7 +498,6 @@ int solve(TinySolver *solver)
 
             // Update rho every 5 iterations
             if (i > 0 && i % 5 == 0) {
->>>>>>> 1ca4d7d4e8fa19e0d4659b81c934f83460bb7f76
                 benchmark_rho_adaptation(
                     &adapter,
                     solver->work->x,
@@ -458,6 +539,10 @@ int solve(TinySolver *solver)
         // Save previous slack variables
         solver->work->v = solver->work->vnew;
         solver->work->z = solver->work->znew;
+        if (solver->settings->en_state_psd) {
+            // Update PSD matrix copy for next iteration
+            solver->work->XXpsd = solver->work->XXpsdnew;
+        }
       
     }
     
