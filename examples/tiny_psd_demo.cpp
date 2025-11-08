@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <Eigen/Dense>
 #include <tinympc/tiny_api.hpp>
 #include "../src/tinympc/psd_support.hpp"
@@ -49,7 +50,8 @@ extern "C" int main() {
     Mat X0 = x0 * x0.transpose();
     for (int i = 0; i < NX0; i++) {
         for (int j = 0; j < NX0; j++) {
-            x0_lift(NX0 + i*NX0 + j) = X0(i,j);
+            // column-major vec: stacks columns of X0
+            x0_lift(NX0 + j*NX0 + i) = X0(i,j);
         }
     }
 
@@ -57,5 +59,48 @@ extern "C" int main() {
 
     // Solve once—watch the PSD eigen prints
     tiny_solve(solver);
+    
+    // Export solution to CSV for plotting
+    std::ofstream csv_file("../psd_trajectory.csv");
+    if (csv_file.is_open()) {
+        // Header
+        csv_file << "k,x1,x2,x3,x4,u1,u2,XX_11,XX_22,rank1_gap\n";
+        
+        for (int k = 0; k < N; ++k) {
+            // Extract solution (from solution->x which has final projected values)
+            Vec xk = solver->solution->x.col(k);
+            
+            // Position and velocity (first 4 states)
+            double x1 = xk(0), x2 = xk(1), x3 = xk(2), x4 = xk(3);
+            
+            // XX matrix diagonal elements (for checking rank-1)
+            Mat XX_vec(NX0, NX0);
+            for (int j = 0; j < NX0; ++j) {
+                for (int i = 0; i < NX0; ++i) {
+                    XX_vec(i,j) = xk(NX0 + j*NX0 + i); // column-major
+                }
+            }
+            double XX_11 = XX_vec(0,0);
+            double XX_22 = XX_vec(1,1);
+            
+            // Rank-1 gap for this stage
+            Vec x_base = xk.topRows(NX0);
+            double gap = (XX_vec - x_base * x_base.transpose()).norm();
+            
+            csv_file << k << "," << x1 << "," << x2 << "," << x3 << "," << x4;
+            
+            if (k < N-1) {
+                Vec uk = solver->solution->u.col(k);
+                csv_file << "," << uk(0) << "," << uk(1);
+            } else {
+                csv_file << ",0,0";  // No control at terminal stage
+            }
+            
+            csv_file << "," << XX_11 << "," << XX_22 << "," << gap << "\n";
+        }
+        csv_file.close();
+        std::cout << "\n[EXPORT] Trajectory saved to ../psd_trajectory.csv\n";
+    }
+    
     return 0;
 }
