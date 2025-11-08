@@ -76,6 +76,8 @@ typedef struct {
     int en_input_linear;
     int en_tv_state_linear;
     int en_tv_input_linear;
+    int en_state_psd;   // Enable PSD constraint on state blocks
+    int en_input_psd;   // Enable PSD constraint on input blocks
         
     // Add adaptive rho parameters
     int adaptive_rho;                  // Enable/disable adaptive rho (1/0)
@@ -189,6 +191,15 @@ typedef struct {
     // Dual variables for time-varying linear constraints
     tinyMatrix gl_tv; // nx x N
     tinyMatrix yl_tv; // nu x N-1
+
+    // PSD (semidefinite) constraint variables (state-only scaffolding)
+    // Slack vector that will be coupled to x via ADMM
+    tinyMatrix vpsd;     // nx x N
+    tinyMatrix vpsdnew;  // nx x N
+    tinyMatrix gpsd;     // nx x N (dual for y = x consensus)
+    // Auxiliary symmetric block variables stored column-wise as vec(XX)
+    tinyMatrix XXpsd;     // (nx*nx) x N
+    tinyMatrix XXpsdnew;  // (nx*nx) x N
 
     // Q, R, A, B, f given by user
     tinyVector Q;       // nx x 1
