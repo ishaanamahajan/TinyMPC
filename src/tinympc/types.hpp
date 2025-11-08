@@ -56,6 +56,9 @@ typedef struct {
     tinyMatrix dPinf_drho;
     tinyMatrix dC1_drho;
     tinyMatrix dC2_drho;
+    
+    // PSD penalty parameter
+    tinytype rho_psd;
 } TinyCache;
 /**
 * User settings
@@ -79,6 +82,11 @@ typedef struct {
     tinytype adaptive_rho_min;         // Minimum value for rho
     tinytype adaptive_rho_max;         // Maximum value for rho
     int adaptive_rho_enable_clipping;  // Enable/disable clipping of rho (1/0)
+    
+    // PSD constraint parameters
+    int en_psd;                        // Enable/disable PSD constraints (1/0)
+    int nx0_psd;                       // Original state dimension for PSD
+    int nu0_psd;                       // Original control dimension for PSD
 } TinySettings;
 
 
@@ -196,7 +204,10 @@ typedef struct {
     // Temporaries
     tinyVector Qu;      // nu x 1
 
-
+    // PSD constraint variables
+    tinyMatrix Spsd;     // PSD slack variables (psd_dim^2 x N)
+    tinyMatrix Spsd_new; // Updated PSD slack variables (psd_dim^2 x N)
+    tinyMatrix Hpsd;     // PSD dual variables (psd_dim^2 x N)
 
     // Variables for keeping track of solve status
     tinytype primal_residual_state;

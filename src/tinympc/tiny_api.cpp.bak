@@ -430,6 +430,13 @@ int tiny_set_default_settings(TinySettings* settings) {
     settings->en_tv_state_linear = TINY_DEFAULT_EN_TV_STATE_LINEAR;
     settings->en_tv_input_linear = TINY_DEFAULT_EN_TV_INPUT_LINEAR;
     
+<<<<<<< HEAD
+    // Default adaptive rho settings
+    settings->adaptive_rho = 0;                // 1 - Enabled, 0 - Disabled
+    settings->adaptive_rho_min = 1.0;          // Minimum rho value
+    settings->adaptive_rho_max = 100.0;        // Maximum rho value
+    settings->adaptive_rho_enable_clipping = 1; // 1 - Enable clipping, 0 - Disable clipping
+=======
     // Initialize adaptive rho settings
     // NOTE : Adaptive rho currently supports only quadrotor system
     settings->adaptive_rho = 0;  // Disabled by default
@@ -437,11 +444,7 @@ int tiny_set_default_settings(TinySettings* settings) {
     settings->adaptive_rho_max = 100.0;
     settings->adaptive_rho_enable_clipping = 1;
 
-    // Initialize PSD constraint settings
-    settings->en_psd    = 0;
-    settings->nx0_psd   = 0;
-    settings->nu0_psd   = 0;
-
+>>>>>>> 1ca4d7d4e8fa19e0d4659b81c934f83460bb7f76
     return 0;
 }
 

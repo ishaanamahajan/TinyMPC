@@ -1,6 +1,5 @@
 #include <iostream>
 
-#include <Eigen/Dense>
 #include "admm.hpp"
 #include "rho_benchmark.hpp"    
 
@@ -71,113 +70,6 @@ tinyVector project_soc(tinyVector s, float mu) {
 tinyVector project_hyperplane(const tinyVector& z, const tinyVector& a, tinytype b) {
     tinytype dist = (a.dot(z) - b) / a.squaredNorm();
     return z - dist * a;
-}
-
-// ---------- PSD utilities ----------
-static inline void symm_to_vec(const tinyMatrix& S, tinyVector& v) {
-    Eigen::Map<tinyMatrix>(v.data(), S.rows(), S.cols()) = S;  // col-major
-}
-
-static inline void assemble_psd_block(TinySolver* solver, int k, tinyMatrix& M, bool last)
-{
-    const int nx0 = solver->settings->nx0_psd;
-    const int nu0 = solver->settings->nu0_psd;
-    const int psd_dim = 1 + nx0 + nu0;
-    M.setZero(psd_dim, psd_dim);
-    M(0,0) = 1.0;
-
-    const int nxL = solver->work->nx;
-    const int nuL = solver->work->nu;
-    const int nxx = nx0*nx0, nxu = nx0*nu0, nux = nu0*nx0, nuu = nu0*nu0;
-
-    // x_bar = [x; vec(XX)]
-    const tinyVector xk = solver->work->x.col(k);
-    tinyVector x  = xk.topRows(nx0);
-    tinyVector vXX = xk.middleRows(nx0, nxx);
-    tinyMatrix XX = Eigen::Map<const tinyMatrix>(vXX.data(), nx0, nx0);
-
-    M.block(0,1,1,nx0) = x.transpose();
-    M.block(1,0,nx0,1) = x;
-    M.block(1,1,nx0,nx0) = 0.5*(XX + XX.transpose());  // numeric symm
-
-    if (!last) {
-        // u_bar = [u; vec(XU); vec(UX); vec(UU)]
-        const tinyVector uk = solver->work->u.col(k);
-        tinyVector u  = uk.topRows(nu0);
-        tinyVector vXU = uk.middleRows(nu0, nxu);
-        tinyVector vUX = uk.middleRows(nu0+nxu, nux);
-        tinyVector vUU = uk.bottomRows(nuu);
-
-        tinyMatrix XU = Eigen::Map<const tinyMatrix>(vXU.data(), nx0, nu0);
-        tinyMatrix UX = Eigen::Map<const tinyMatrix>(vUX.data(), nu0, nx0);
-        tinyMatrix UU = Eigen::Map<const tinyMatrix>(vUU.data(), nu0, nu0);
-
-        M.block(0,1+nx0,1,nu0)         = u.transpose();
-        M.block(1+nx0,0,nu0,1)         = u;
-        M.block(1,1+nx0,nx0,nu0)       = XU;
-        M.block(1+nx0,1,nu0,nx0)       = UX;
-        M.block(1+nx0,1+nx0,nu0,nu0)   = 0.5*(UU + UU.transpose());
-    }
-}
-
-void update_psd_slack(TinySolver *solver)
-{
-    if (!solver->settings->en_psd) return;
-    const int nx0 = solver->settings->nx0_psd;
-    const int nu0 = solver->settings->nu0_psd;
-    const int psd_dim = 1 + nx0 + nu0;
-
-    for (int k = 0; k < solver->work->N; ++k)
-    {
-        const bool last = (k == solver->work->N-1);
-
-        tinyMatrix M(psd_dim, psd_dim);
-        assemble_psd_block(solver, k, M, last);
-
-        tinyMatrix Hk = Eigen::Map<const tinyMatrix>(
-            solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
-
-        tinyMatrix Raw = M + Hk;
-
-        // PSD projection (with prints)
-        Eigen::SelfAdjointEigenSolver<tinyMatrix> es(Raw);
-        tinyVector lam = es.eigenvalues();
-        tinytype minlam_raw = lam.minCoeff();
-        lam = lam.cwiseMax(0);
-        tinyMatrix Mproj = es.eigenvectors() * lam.asDiagonal() * es.eigenvectors().transpose();
-
-        tinyVector col(psd_dim*psd_dim);
-        symm_to_vec(Mproj, col);
-        solver->work->Spsd_new.col(k) = col;
-
-        std::cout << "[PSD] k=" << k
-                  << " eigmin(raw M+H)=" << minlam_raw
-                  << " -> eigmin(proj)=" << lam.minCoeff() << "\n";
-    }
-}
-
-void update_psd_dual(TinySolver *solver)
-{
-    if (!solver->settings->en_psd) return;
-    const int nx0 = solver->settings->nx0_psd;
-    const int nu0 = solver->settings->nu0_psd;
-    const int psd_dim = 1 + nx0 + nu0;
-
-    for (int k = 0; k < solver->work->N; ++k)
-    {
-        const bool last = (k == solver->work->N-1);
-
-        tinyMatrix M(psd_dim, psd_dim);
-        assemble_psd_block(solver, k, M, last);
-
-        tinyMatrix Hk = Eigen::Map<const tinyMatrix>(
-            solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
-        tinyMatrix Snew = Eigen::Map<const tinyMatrix>(
-            solver->work->Spsd_new.col(k).data(), psd_dim, psd_dim);
-
-        Hk = Hk + (M - Snew);
-        tinyVector tmpH(psd_dim*psd_dim); symm_to_vec(Hk, tmpH); solver->work->Hpsd.col(k) = tmpH;
-    }
 }
 
 /**
@@ -409,47 +301,6 @@ void update_linear_cost(TinySolver *solver)
     if (solver->settings->en_tv_state_linear) {
         solver->work->p.col(solver->work->N - 1) -= solver->cache->rho * (solver->work->vlnew_tv.col(solver->work->N - 1) - solver->work->gl_tv.col(solver->work->N - 1));
     }
-
-    // --- PSD pullback: q/r -= rho_psd * L^T( Snew - H ) -------------------------
-    if (solver->settings->en_psd)
-    {
-        const int nx0 = solver->settings->nx0_psd;
-        const int nu0 = solver->settings->nu0_psd;
-        const int psd_dim = 1 + nx0 + nu0;
-        const int nxx = nx0*nx0, nxu = nx0*nu0, nux = nu0*nx0, nuu = nu0*nu0;
-
-        for (int k = 0; k < solver->work->N; ++k)
-        {
-            const bool last = (k == solver->work->N-1);
-            tinyMatrix Snew = Eigen::Map<const tinyMatrix>(
-                solver->work->Spsd_new.col(k).data(), psd_dim, psd_dim);
-            tinyMatrix Hk = Eigen::Map<const tinyMatrix>(
-                solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
-
-            const tinyMatrix T = Snew - Hk; // "znew - y" analog
-
-            // State pullback
-            solver->work->q.col(k).topRows(nx0)     .array() -= solver->cache->rho_psd * T.block(1,0, nx0,1).array();
-
-            tinyVector vXX(nxx);
-            Eigen::Map<tinyMatrix>(vXX.data(), nx0, nx0) = T.block(1,1, nx0,nx0);
-            solver->work->q.col(k).middleRows(nx0, nxx).array() -= solver->cache->rho_psd * vXX.array();
-
-            if (!last) {
-                // Input/lifted-input pullback
-                solver->work->r.col(k).topRows(nu0)     .array() -= solver->cache->rho_psd * T.block(1+nx0,0, nu0,1).array();
-
-                tinyVector vXU(nxu), vUX(nux), vUU(nuu);
-                Eigen::Map<tinyMatrix>(vXU.data(), nx0, nu0)    = T.block(1,1+nx0, nx0,nu0);
-                Eigen::Map<tinyMatrix>(vUX.data(), nu0, nx0)    = T.block(1+nx0,1, nu0,nx0);
-                Eigen::Map<tinyMatrix>(vUU.data(), nu0, nu0)    = T.block(1+nx0,1+nx0, nu0,nu0);
-
-                solver->work->r.col(k).middleRows(nu0, nxu)             .array() -= solver->cache->rho_psd * vXU.array();
-                solver->work->r.col(k).middleRows(nu0 + nxu, nux)       .array() -= solver->cache->rho_psd * vUX.array();
-                solver->work->r.col(k).bottomRows(nuu)                  .array() -= solver->cache->rho_psd * vUU.array();
-            }
-        }
-    }
 }
 
 /**
@@ -537,17 +388,24 @@ int solve(TinySolver *solver)
         // Project slack variables into feasible domain
         update_slack(solver);
 
-        // NEW: PSD projector (prints per-stage eigmins)
-        update_psd_slack(solver);
-
         // Compute next iteration of dual variables
         update_dual(solver);
 
-        // NEW: PSD dual update
-        update_psd_dual(solver);
-
         solver->work->iter += 1;
 
+<<<<<<< HEAD
+
+        if (solver->settings->adaptive_rho) {
+
+            // Calculate residuals for adaptive rho
+            tinytype pri_res_input = (solver->work->u - solver->work->znew).cwiseAbs().maxCoeff();
+            tinytype pri_res_state = (solver->work->x - solver->work->vnew).cwiseAbs().maxCoeff();
+            tinytype dua_res_input = solver->cache->rho * (solver->work->znew - z_prev).cwiseAbs().maxCoeff();
+            tinytype dua_res_state = solver->cache->rho * (solver->work->vnew - v_prev).cwiseAbs().maxCoeff();
+
+            // Update rho every 5 iterations
+            if (i> 0 && i % 5 == 0) {
+=======
         // Handle adaptive rho if enabled
         if (solver->settings->adaptive_rho) {
             // Calculate residuals for adaptive rho
@@ -558,6 +416,7 @@ int solve(TinySolver *solver)
 
             // Update rho every 5 iterations
             if (i > 0 && i % 5 == 0) {
+>>>>>>> 1ca4d7d4e8fa19e0d4659b81c934f83460bb7f76
                 benchmark_rho_adaptation(
                     &adapter,
                     solver->work->x,

@@ -20,6 +20,10 @@ target_link_libraries(quadrotor_tv_linear_constraints LINK_PUBLIC tinympcstatic)
 add_executable(rocket_landing_mpc rocket_landing_mpc.cpp)
 target_link_libraries(rocket_landing_mpc LINK_PUBLIC tinympcstatic)
 
+# PSD demo example
+add_executable(tiny_psd_demo tiny_psd_demo.cpp)
+target_link_libraries(tiny_psd_demo LINK_PUBLIC tinympcstatic)
+
 # Codegen examples
 add_executable(codegen_random codegen_random.cpp)
 target_link_libraries(codegen_random LINK_PUBLIC tinympcstatic)
