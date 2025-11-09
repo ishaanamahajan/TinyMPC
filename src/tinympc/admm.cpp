@@ -3,7 +3,6 @@
 #include <Eigen/Dense>
 #include "admm.hpp"
 #include "rho_benchmark.hpp"    
-#include "psd_support.hpp"
 #include <cmath>
 
 #define DEBUG_MODULE "TINYALG"
@@ -600,15 +599,7 @@ int solve(TinySolver *solver)
 
         forward_pass(solver);
 
-        // Update per-stage base tangent half-spaces using the latest rollout
-        if (solver->settings->en_tv_state_linear && solver->settings->en_base_tangent_tv) {
-            tiny_update_base_tangent_avoidance_tv(
-                solver,
-                solver->settings->obs_x,
-                solver->settings->obs_y,
-                solver->settings->obs_r,
-                solver->settings->obs_margin);
-        }
+        // No time-varying base tangent updates in the pure-PSD demo path
 
         // Project slack variables into feasible domain
         update_slack(solver);
