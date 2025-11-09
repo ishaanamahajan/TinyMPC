@@ -2,6 +2,8 @@
 
 #include <Eigen/Dense>
 #include <iostream>
+#include <vector>
+#include <array>
 #include <tinympc/tiny_api.hpp>
 
 // Manual Kronecker product implementation
@@ -129,6 +131,187 @@ inline int tiny_enable_base_tangent_avoidance(
     solver->settings->obs_r = r;
     solver->settings->obs_margin = margin;
     return 0;
+}
+
+// Enable non-time-varying linear state constraints with n_constr rows
+inline int tiny_enable_state_linear(TinySolver* solver, int n_constr) {
+    if (!solver) { std::cout << "tiny_enable_state_linear: solver nullptr\n"; return 1; }
+    solver->settings->en_state_linear = 1;
+    solver->work->numStateLinear = n_constr;
+    solver->work->Alin_x = tinyMatrix::Zero(n_constr, solver->work->nx);
+    solver->work->blin_x = tinyVector::Zero(n_constr);
+    // Initialize associated slack/dual storage
+    solver->work->vlnew = solver->work->x;
+    solver->work->gl    = tinyMatrix::Zero(solver->work->nx, solver->work->N);
+    return 0;
+}
+
+// Pure-PSD variant: add lifted disk constraints (no TV relinearization)
+// Each disk j with center (ox,oy) and radius r contributes a row
+// m^T [x; vec(XX)] >= n  where m = [-2ox, -2oy, e11, e22] and n = r^2 - ||o||^2.
+// We store a^T z <= b via a = -m, b = -n into Alin_x, blin_x and enable en_state_linear.
+inline int tiny_set_lifted_disks(
+    TinySolver* solver,
+    const std::vector<std::array<tinytype,3>>& disks)
+{
+    if (!solver) { std::cout << "tiny_set_lifted_disks: solver nullptr\n"; return 1; }
+    const int nx0 = solver->settings->nx0_psd;
+    const int nxL = solver->work->nx;
+    if (nx0 <= 0) { std::cout << "tiny_set_lifted_disks: nx0_psd not set (>0)\n"; return 1; }
+    const int m = static_cast<int>(disks.size());
+    if (m == 0) return 0;
+
+    tinyMatrix Alin_x = tinyMatrix::Zero(m, nxL);
+    tinyVector blin_x = tinyVector::Zero(m);
+
+    const int idx_xx11 = nx0 + 0 + 0*nx0;
+    const int idx_xx22 = nx0 + 1 + 1*nx0;
+
+    for (int j = 0; j < m; ++j) {
+        const tinytype ox = disks[j][0];
+        const tinytype oy = disks[j][1];
+        const tinytype r  = disks[j][2];
+
+        tinyVector mrow = tinyVector::Zero(nxL);
+        mrow(0) = -2 * ox; mrow(1) = -2 * oy;
+        mrow(idx_xx11) = 1; mrow(idx_xx22) = 1;
+        tinytype n = (r*r - (ox*ox + oy*oy));
+
+        tinyVector a = -mrow;
+        tinytype   b = -n;
+        Alin_x.row(j) = a.transpose();
+        blin_x(j) = b;
+    }
+
+    // Enable and set in solver
+    tiny_enable_state_linear(solver, m);
+    return tiny_set_linear_constraints(
+        solver,
+        Alin_x,
+        blin_x,
+        tinyMatrix::Zero(0, solver->work->nu),
+        tinyVector::Zero(0));
+}
+
+// Append additional non-TV state linear rows to current Alin_x/blin_x
+inline int tiny_append_state_linear_rows(
+    TinySolver* solver,
+    const tinyMatrix& A_extra,
+    const tinyVector& b_extra)
+{
+    if (!solver) { std::cout << "tiny_append_state_linear_rows: solver nullptr\n"; return 1; }
+    if (A_extra.rows() == 0) return 0;
+    if (A_extra.cols() != solver->work->nx) { std::cout << "tiny_append_state_linear_rows: bad cols\n"; return 1; }
+    if (b_extra.rows() != A_extra.rows()) { std::cout << "tiny_append_state_linear_rows: mismatched b rows\n"; return 1; }
+
+    tinyMatrix A_old = solver->work->Alin_x;
+    tinyVector b_old = solver->work->blin_x;
+
+    const int m_old = A_old.rows();
+    const int m_new = m_old + A_extra.rows();
+    tinyMatrix A_cat = tinyMatrix::Zero(m_new, solver->work->nx);
+    tinyVector b_cat = tinyVector::Zero(m_new);
+    if (m_old > 0) {
+        A_cat.topRows(m_old) = A_old;
+        b_cat.topRows(m_old) = b_old;
+    }
+    A_cat.bottomRows(A_extra.rows()) = A_extra;
+    b_cat.bottomRows(b_extra.rows()) = b_extra;
+
+    solver->work->numStateLinear = m_new;
+    solver->settings->en_state_linear = 1;
+    return tiny_set_linear_constraints(
+        solver,
+        A_cat,
+        b_cat,
+        solver->work->Alin_u,
+        solver->work->blin_u);
+}
+
+// Add light McCormick/RLT constraints tying XX(0:1,0:1) to x(0:1) using current bounds.
+// For i==j (diagonal): add upper bound w_ii <= (u_i + l_i) x_i - u_i l_i.
+// For i!=j: add 4 McCormick inequalities for w_ij = x_i x_j.
+inline int tiny_add_rlt_position_xx(TinySolver* solver)
+{
+    if (!solver) { std::cout << "tiny_add_rlt_position_xx: solver nullptr\n"; return 1; }
+    const int nx0 = solver->settings->nx0_psd;
+    if (nx0 < 2) { std::cout << "tiny_add_rlt_position_xx: nx0_psd<2\n"; return 1; }
+    const int nxL = solver->work->nx;
+
+    // Assume constant bounds over N; read from k=0
+    auto get_bounds = [&](int idx)->std::pair<tinytype,tinytype>{
+        tinytype l = solver->work->x_min(idx, 0);
+        tinytype u = solver->work->x_max(idx, 0);
+        return {l,u};
+    };
+
+    auto idx_xx = [&](int i, int j)->int { return nx0 + j*nx0 + i; };
+
+    std::vector<Eigen::Matrix<tinytype, Eigen::Dynamic, 1>> rows;
+    std::vector<tinytype> bs;
+
+    for (int i = 0; i < 2; ++i) {
+        auto [li, ui] = get_bounds(i);
+        // Diagonal upper bound: w_ii - (ui+li) x_i <= -ui*li
+        tinyVector a = tinyVector::Zero(nxL);
+        a(i) = -(ui + li);
+        a(idx_xx(i,i)) = 1.0;
+        rows.push_back(a);
+        bs.push_back(-ui*li);
+    }
+
+    // Off-diagonal (0,1) and (1,0)
+    for (int p = 0; p < 2; ++p) {
+        int i = (p == 0) ? 0 : 1;
+        int j = (p == 0) ? 1 : 0;
+        auto [li, ui] = get_bounds(i);
+        auto [lj, uj] = get_bounds(j);
+        int w = idx_xx(i,j);
+
+        // 1) -w + lj x_i + li x_j <= li*lj
+        {
+            tinyVector a = tinyVector::Zero(nxL);
+            a(w) = -1.0;
+            a(i) = lj;
+            a(j) = li;
+            rows.push_back(a);
+            bs.push_back(li*lj);
+        }
+        // 2) -w + uj x_i + ui x_j <= ui*uj
+        {
+            tinyVector a = tinyVector::Zero(nxL);
+            a(w) = -1.0;
+            a(i) = uj;
+            a(j) = ui;
+            rows.push_back(a);
+            bs.push_back(ui*uj);
+        }
+        // 3) w - uj x_i - li x_j <= -li*uj
+        {
+            tinyVector a = tinyVector::Zero(nxL);
+            a(w) = 1.0;
+            a(i) = -uj;
+            a(j) = -li;
+            rows.push_back(a);
+            bs.push_back(-li*uj);
+        }
+        // 4) w - lj x_i - ui x_j <= -ui*lj
+        {
+            tinyVector a = tinyVector::Zero(nxL);
+            a(w) = 1.0;
+            a(i) = -lj;
+            a(j) = -ui;
+            rows.push_back(a);
+            bs.push_back(-ui*lj);
+        }
+    }
+
+    const int m = static_cast<int>(rows.size());
+    if (m == 0) return 0;
+    tinyMatrix Aadd = tinyMatrix::Zero(m, nxL);
+    tinyVector Badd = tinyVector::Zero(m);
+    for (int r = 0; r < m; ++r) { Aadd.row(r) = rows[r].transpose(); Badd(r) = bs[r]; }
+    return tiny_append_state_linear_rows(solver, Aadd, Badd);
 }
 
 inline void tiny_set_circle_avoidance(TinySolver* solver, tinytype ox, tinytype oy, tinytype r) {
