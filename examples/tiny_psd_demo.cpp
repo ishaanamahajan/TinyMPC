@@ -90,11 +90,10 @@ extern "C" int main() {
     tiny_set_x_ref(solver, Mat::Zero(nxL, N));
     tiny_set_u_ref(solver, Mat::Zero(nuL, N-1));
 
-    // Pure-PSD variant: lifted disks + light RLT (no TV tangents)
+    // Pure-PSD variant: lifted disks (no TV tangents)
     const tinytype ox = -5.0, oy = 0.0, r = 2.0;
     std::vector<std::array<tinytype,3>> disks = {{ {ox, oy, r} }}; // one circle
     tiny_set_lifted_disks(solver, disks);
-    tiny_add_rlt_position_xx(solver);
 
     // Solve once—watch the PSD eigen prints
     tiny_solve(solver);
