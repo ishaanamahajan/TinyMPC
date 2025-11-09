@@ -1,5 +1,6 @@
 #include <iostream>
 #include <fstream>
+#include <limits>
 #include <Eigen/Dense>
 #include <tinympc/tiny_api.hpp>
 #include "../src/tinympc/psd_support.hpp"
@@ -22,26 +23,54 @@ extern "C" int main() {
     const int nxL = A.rows();
     const int nuL = B.cols();
 
-    // Tiny diagonal Q/R (keep tiny for now)
-    Mat Q = Mat::Identity(nxL, nxL) * tinytype(1e-6);
-    Mat R = Mat::Identity(nuL, nuL) * tinytype(1e-6);
+    // Weights: emphasize base motion, keep lift modest; stronger on UU
+    Mat Q = Mat::Zero(nxL, nxL);
+    // Base state: [x, y, vx, vy] (slightly stronger to avoid saturation)
+    Q(0,0) = 10.0; Q(1,1) = 10.0; Q(2,2) = 1.0; Q(3,3) = 1.0;
+    // Lifted vec(XX): modest weight (q_xx ~ 0.1)
+    Q.diagonal().segment(NX0, NX0*NX0).array() = tinytype(0.1);
+
+    Mat R = Mat::Zero(nuL, nuL);
+    const int nxu = NX0*NU0, nux = NU0*NX0, nuu = NU0*NU0;
+    // Base input: higher cost to avoid saturation
+    R.diagonal().head(NU0).array() = tinytype(20.0);
+    // Lifted input blocks: r_xx ~ 10 on XU/UX, R_xx ~ 500 on UU
+    R.diagonal().segment(NU0, nxu).array() = tinytype(10.0);            // vec(XU)
+    R.diagonal().segment(NU0 + nxu, nux).array() = tinytype(10.0);      // vec(UX)
+    R.diagonal().segment(NU0 + nxu + nux, nuu).array() = tinytype(500.0); // vec(UU)
     Vec fdyn = Vec::Zero(nxL);
 
     TinySolver *solver = nullptr;
     int status = tiny_setup(&solver,
                             A, B, fdyn, Q, R,
-                            /*rho*/ tinytype(1.0), nxL, nuL, N,
+                            /*rho*/ tinytype(2.0), nxL, nuL, N,
                             /*verbose=*/1); // prints A,B,Q,R, Kinf, Pinf
     if (status) return status;
 
-    // No bounds
-    Mat x_min = Mat::Constant(nxL, N, -1e17);
-    Mat x_max = Mat::Constant(nxL, N,  1e17);
-    Mat u_min = Mat::Constant(nuL, N-1, -1e17);
-    Mat u_max = Mat::Constant(nuL, N-1,  1e17);
+    // Bounds: cap base states/controls; add generous caps on lifted blocks to avoid numeric blow-up
+    Mat x_min = Mat::Constant(nxL, N, -std::numeric_limits<tinytype>::infinity());
+    Mat x_max = Mat::Constant(nxL, N,  std::numeric_limits<tinytype>::infinity());
+    x_min.topRows(NX0).setConstant(-30.0);
+    x_max.topRows(NX0).setConstant( 30.0);
+    // Gentle caps on vec(XX)
+    x_min.middleRows(NX0, NX0*NX0).setConstant(-1000.0);
+    x_max.middleRows(NX0, NX0*NX0).setConstant( 1000.0);
+
+    Mat u_min = Mat::Constant(nuL, N-1, -std::numeric_limits<tinytype>::infinity());
+    Mat u_max = Mat::Constant(nuL, N-1,  std::numeric_limits<tinytype>::infinity());
+    u_min.topRows(NU0).setConstant(-3.0);
+    u_max.topRows(NU0).setConstant( 3.0);
+    // Gentle caps on lifted inputs
+    u_min.bottomRows(nxu + nux + nuu).setConstant(-1000.0);
+    u_max.bottomRows(nxu + nux + nuu).setConstant( 1000.0);
     tiny_set_bound_constraints(solver, x_min, x_max, u_min, u_max);
 
-    tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(1.0));
+    // Enable PSD coupling with a small rho_psd initially (0.5–1.0)
+    const bool ENABLE_PSD = true;
+    if (ENABLE_PSD) {
+        // Start small; you can ramp to 3–5 later if needed
+        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(1.0));
+    }
 
     // Lifted initial condition: [x0; vec(x0*x0')]
     Vec x0(NX0); x0 << -10, 0.1, 0, 0;
@@ -56,6 +85,16 @@ extern "C" int main() {
     }
 
     tiny_set_x0(solver, x0_lift);
+
+    // No linear reference terms
+    tiny_set_x_ref(solver, Mat::Zero(nxL, N));
+    tiny_set_u_ref(solver, Mat::Zero(nuL, N-1));
+
+    // Phase 1: Base tangent plane obstacle (no PSD coupling).
+    // Per-iteration TV half-space on base (x,y) only.
+    const tinytype ox = -5.0, oy = 0.0, r = 2.0;
+    const tinytype margin = tinytype(0.05);
+    tiny_enable_base_tangent_avoidance(solver, ox, oy, r, margin);
 
     // Solve once—watch the PSD eigen prints
     tiny_solve(solver);

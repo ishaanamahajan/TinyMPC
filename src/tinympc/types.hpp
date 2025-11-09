@@ -89,6 +89,13 @@ typedef struct {
     int en_psd;                        // Enable/disable PSD constraints (1/0)
     int nx0_psd;                       // Original state dimension for PSD
     int nu0_psd;                       // Original control dimension for PSD
+
+    // TV base-tangent avoidance (obstacle) parameters
+    int en_base_tangent_tv;            // Enable base-level tangent half-space updates per-iteration
+    tinytype obs_x;                    // Obstacle x center
+    tinytype obs_y;                    // Obstacle y center
+    tinytype obs_r;                    // Obstacle radius
+    tinytype obs_margin;               // Extra margin beyond radius
 } TinySettings;
 
 

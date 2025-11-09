@@ -442,6 +442,13 @@ int tiny_set_default_settings(TinySettings* settings) {
     settings->nx0_psd   = 0;
     settings->nu0_psd   = 0;
 
+    // Initialize TV base-tangent obstacle settings
+    settings->en_base_tangent_tv = 0;
+    settings->obs_x = 0.0;
+    settings->obs_y = 0.0;
+    settings->obs_r = 0.0;
+    settings->obs_margin = 0.0;
+
     return 0;
 }
 

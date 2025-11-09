@@ -3,6 +3,8 @@
 #include <Eigen/Dense>
 #include "admm.hpp"
 #include "rho_benchmark.hpp"    
+#include "psd_support.hpp"
+#include <cmath>
 
 #define DEBUG_MODULE "TINYALG"
 
@@ -60,17 +62,24 @@ tinyVector project_soc(tinyVector s, float mu) {
     }
 }
 
-/**
- * Project a vector z onto a hyperplane defined by a^T z = b
- * Implements equation (21): ΠH(z) = z - (⟨z, a⟩ − b)/||a||² * a
- * @param z Vector to project
- * @param a Normal vector of the hyperplane
- * @param b Offset of the hyperplane
- * @return Projection of z onto the hyperplane
- */
-tinyVector project_hyperplane(const tinyVector& z, const tinyVector& a, tinytype b) {
-    tinytype dist = (a.dot(z) - b) / a.squaredNorm();
-    return z - dist * a;
+// Project onto half-space { z | a^T z <= b } with guards
+static inline tinyVector project_halfspace_leq(const tinyVector& z,
+                                               const tinyVector& a,
+                                               tinytype b) {
+    tinytype anorm2 = a.squaredNorm();
+    if (!(std::isfinite(anorm2)) || anorm2 <= tinytype(1e-12)) {
+        return z; // ill-posed row; skip
+    }
+    tinytype val = a.dot(z);
+    if (!(std::isfinite(val))) return z;
+    if (val <= b) return z; // already feasible
+    tinytype step = (val - b) / anorm2;
+    if (!(std::isfinite(step))) return z;
+    // Optional clamp to avoid extreme jumps
+    const tinytype clamp_val = 1e3;
+    if (step > clamp_val) step = clamp_val;
+    if (step < -clamp_val) step = -clamp_val;
+    return z - step * a;
 }
 
 // ---------- PSD utilities ----------
@@ -90,10 +99,14 @@ static inline void assemble_psd_block(TinySolver* solver, int k, tinyMatrix& M, 
     const int nuL = solver->work->nu;
     const int nxx = nx0*nx0, nxu = nx0*nu0, nux = nu0*nx0, nuu = nu0*nu0;
 
-    // x_bar = [x; vec(XX)]
-    const tinyVector xk = solver->work->x.col(k);
-    tinyVector x  = xk.topRows(nx0);
-    tinyVector vXX = xk.middleRows(nx0, nxx);
+    // x_bar = [x; vec(XX)] built from consensus/slack if primal is non-finite
+    tinyVector xsafe = solver->work->x.col(k);
+    if (!xsafe.allFinite()) {
+        if (solver->work->vnew.col(k).allFinite()) xsafe = solver->work->vnew.col(k);
+        else xsafe.setZero();
+    }
+    tinyVector x  = xsafe.topRows(nx0);
+    tinyVector vXX = xsafe.middleRows(nx0, nxx);
     tinyMatrix XX = Eigen::Map<const tinyMatrix>(vXX.data(), nx0, nx0);
 
     M.block(0,1,1,nx0) = x.transpose();
@@ -101,12 +114,16 @@ static inline void assemble_psd_block(TinySolver* solver, int k, tinyMatrix& M, 
     M.block(1,1,nx0,nx0) = 0.5*(XX + XX.transpose());  // numeric symm
 
     if (!last) {
-        // u_bar = [u; vec(XU); vec(UX); vec(UU)]
-        const tinyVector uk = solver->work->u.col(k);
-        tinyVector u  = uk.topRows(nu0);
-        tinyVector vXU = uk.middleRows(nu0, nxu);
-        tinyVector vUX = uk.middleRows(nu0+nxu, nux);
-        tinyVector vUU = uk.bottomRows(nuu);
+        // u_bar = [u; vec(XU); vec(UX); vec(UU)] using consensus/slack if needed
+        tinyVector usafe = solver->work->u.col(k);
+        if (!usafe.allFinite()) {
+            if (solver->work->znew.col(k).allFinite()) usafe = solver->work->znew.col(k);
+            else usafe.setZero();
+        }
+        tinyVector u  = usafe.topRows(nu0);
+        tinyVector vXU = usafe.middleRows(nu0, nxu);
+        tinyVector vUX = usafe.middleRows(nu0+nxu, nux);
+        tinyVector vUU = usafe.bottomRows(nuu);
 
         tinyMatrix XU = Eigen::Map<const tinyMatrix>(vXU.data(), nx0, nu0);
         tinyMatrix UX = Eigen::Map<const tinyMatrix>(vUX.data(), nu0, nx0);
@@ -137,14 +154,35 @@ void update_psd_slack(TinySolver *solver)
         tinyMatrix Hk = Eigen::Map<const tinyMatrix>(
             solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
 
+        // Guard against non-finite input to the eigen solver
+        if (!M.allFinite() || !Hk.allFinite()) {
+            solver->work->Spsd_new.col(k).setZero();
+            std::cout << "[PSD] k=" << k << " non-finite M/H, skipping projection" << "\n";
+            continue;
+        }
+
         tinyMatrix Raw = M + Hk;
+        if (!Raw.allFinite()) {
+            solver->work->Spsd_new.col(k).setZero();
+            std::cout << "[PSD] k=" << k << " Raw non-finite, skipping projection" << "\n";
+            continue;
+        }
+
+        // Scale Raw to keep eigensolver in a safe numeric range
+        const tinytype RAW_CLIP = 1e6; // target magnitude cap
+        tinytype max_abs = Raw.cwiseAbs().maxCoeff();
+        tinytype scale = tinytype(1.0);
+        if (std::isfinite(max_abs) && max_abs > RAW_CLIP) {
+            scale = max_abs / RAW_CLIP; // so max(|Raw/scale|) ~= RAW_CLIP
+        }
 
         // PSD projection (with prints)
-        Eigen::SelfAdjointEigenSolver<tinyMatrix> es(Raw);
+        Eigen::SelfAdjointEigenSolver<tinyMatrix> es(Raw / scale);
         tinyVector lam = es.eigenvalues();
-        tinytype minlam_raw = lam.minCoeff();
+        tinytype minlam_raw = lam.minCoeff() * (1.0/scale);
         lam = lam.cwiseMax(0);
         tinyMatrix Mproj = es.eigenvectors() * lam.asDiagonal() * es.eigenvectors().transpose();
+        Mproj *= scale; // unscale
 
         tinyVector col(psd_dim*psd_dim);
         symm_to_vec(Mproj, col);
@@ -175,7 +213,21 @@ void update_psd_dual(TinySolver *solver)
         tinyMatrix Snew = Eigen::Map<const tinyMatrix>(
             solver->work->Spsd_new.col(k).data(), psd_dim, psd_dim);
 
-        Hk = Hk + (M - Snew);
+        // Under-relaxed dual update to improve stability
+        const tinytype gamma_psd = 0.2;
+        Hk = Hk + gamma_psd * (M - Snew);
+
+        // Clip dual magnitude to avoid numerical blow-up
+        const tinytype H_CLIP = 1e3;
+        for (int r = 0; r < Hk.rows(); ++r) {
+            for (int c = 0; c < Hk.cols(); ++c) {
+                tinytype v = Hk(r,c);
+                if (!std::isfinite(v)) v = 0;
+                if (v > H_CLIP) v = H_CLIP;
+                if (v < -H_CLIP) v = -H_CLIP;
+                Hk(r,c) = v;
+            }
+        }
         tinyVector tmpH(psd_dim*psd_dim); symm_to_vec(Hk, tmpH); solver->work->Hpsd.col(k) = tmpH;
     }
 }
@@ -256,12 +308,9 @@ void update_slack(TinySolver *solver)
     if (solver->settings->en_state_linear) {
         for (int i=0; i<solver->work->N; i++) {
             for (int k=0; k<solver->work->numStateLinear; k++) {
-                tinyVector a = solver->work->Alin_x.row(k);
+                tinyVector a = solver->work->Alin_x.row(k).transpose();
                 tinytype b = solver->work->blin_x(k);
-                tinytype constraint_value = a.dot(solver->work->vlnew.col(i));
-                if (constraint_value > b) {  // Only project if constraint is violated
-                    solver->work->vlnew.col(i) = project_hyperplane(solver->work->vlnew.col(i), a, b);
-                }
+                solver->work->vlnew.col(i) = project_halfspace_leq(solver->work->vlnew.col(i), a, b);
             }
         }
     }
@@ -270,12 +319,9 @@ void update_slack(TinySolver *solver)
     if (solver->settings->en_input_linear) {
         for (int i=0; i<solver->work->N-1; i++) {
             for (int k=0; k<solver->work->numInputLinear; k++) {
-                tinyVector a = solver->work->Alin_u.row(k);
+                tinyVector a = solver->work->Alin_u.row(k).transpose();
                 tinytype b = solver->work->blin_u(k);
-                tinytype constraint_value = a.dot(solver->work->zlnew.col(i));
-                if (constraint_value > b) {  // Only project if constraint is violated
-                    solver->work->zlnew.col(i) = project_hyperplane(solver->work->zlnew.col(i), a, b);
-                }
+                solver->work->zlnew.col(i) = project_halfspace_leq(solver->work->zlnew.col(i), a, b);
             }
         }
     }
@@ -293,12 +339,32 @@ void update_slack(TinySolver *solver)
     // Time-varying Linear constraints on state
     if (solver->settings->en_tv_state_linear) {
         for (int i=0; i<solver->work->N; i++) {
-            for (int k=0; k<solver->work->numtvStateLinear; k++) {
-                tinyVector a = solver->work->tv_Alin_x.row((solver->work->numtvStateLinear*i) + k);
+            // Sanitize current column to avoid NaN propagation
+            if (!solver->work->vlnew_tv.col(i).allFinite()) {
+                if (solver->work->x.col(i).allFinite()) {
+                    solver->work->vlnew_tv.col(i) = solver->work->x.col(i);
+                } else {
+                    solver->work->vlnew_tv.col(i).setZero();
+                }
+            }
+            const int nc = solver->work->numtvStateLinear;
+            for (int k=0; k<nc; k++) {
+                int row = i*nc + k;
+                tinyVector a = solver->work->tv_Alin_x.row(row).transpose();
                 tinytype b = solver->work->tv_blin_x(k,i);
-                tinytype constraint_value = a.dot(solver->work->vlnew_tv.col(i));
-                if (constraint_value > b) {  // Only project if constraint is violated
-                    solver->work->vlnew_tv.col(i) = project_hyperplane(solver->work->vlnew_tv.col(i), a, b);
+                solver->work->vlnew_tv.col(i) = project_halfspace_leq(solver->work->vlnew_tv.col(i), a, b);
+            }
+            // Cheap invariant/log (sample a few i to avoid spam)
+            if ((i == 0 || i == solver->work->N/2) && nc > 0) {
+                int row = i*nc + 0;
+                tinyVector a = solver->work->tv_Alin_x.row(row).transpose();
+                tinytype b = solver->work->tv_blin_x(0,i);
+                tinytype val = a.dot(solver->work->vlnew_tv.col(i));
+                if (!std::isfinite(val) || !std::isfinite(b) || a.squaredNorm() <= 1e-12) {
+                    std::cout << "[TV-LIN] i="<<i<<" bad row: ||a||^2="<<a.squaredNorm()
+                              <<" val="<<val<<" b="<<b<<"\n";
+                } else {
+                    std::cout << "[TV-LIN] i="<<i<<" residual="<<(val - b) << "\n";
                 }
             }
         }
@@ -307,13 +373,12 @@ void update_slack(TinySolver *solver)
     // Time-varying Linear constraints on input
     if (solver->settings->en_tv_input_linear) {
         for (int i=0; i<solver->work->N-1; i++) {
-            for (int k=0; k<solver->work->numtvInputLinear; k++) {
-                tinyVector a = solver->work->tv_Alin_u.row((solver->work->numtvInputLinear*i) + k);
+            const int nc = solver->work->numtvInputLinear;
+            for (int k=0; k<nc; k++) {
+                int row = i*nc + k;
+                tinyVector a = solver->work->tv_Alin_u.row(row).transpose();
                 tinytype b = solver->work->tv_blin_u(k,i);
-                tinytype constraint_value = a.dot(solver->work->zlnew_tv.col(i));
-                if (constraint_value > b) {  // Only project if constraint is violated
-                    solver->work->zlnew_tv.col(i) = project_hyperplane(solver->work->zlnew_tv.col(i), a, b);
-                }
+                solver->work->zlnew_tv.col(i) = project_halfspace_leq(solver->work->zlnew_tv.col(i), a, b);
             }
         }
     }
@@ -427,6 +492,7 @@ void update_linear_cost(TinySolver *solver)
                 solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
 
             const tinyMatrix T = Snew - Hk; // "znew - y" analog
+            if (!T.allFinite()) continue; // guard
 
             // State pullback
             solver->work->q.col(k).topRows(nx0)     .array() -= solver->cache->rho_psd * T.block(1,0, nx0,1).array();
@@ -534,10 +600,20 @@ int solve(TinySolver *solver)
 
         forward_pass(solver);
 
+        // Update per-stage base tangent half-spaces using the latest rollout
+        if (solver->settings->en_tv_state_linear && solver->settings->en_base_tangent_tv) {
+            tiny_update_base_tangent_avoidance_tv(
+                solver,
+                solver->settings->obs_x,
+                solver->settings->obs_y,
+                solver->settings->obs_r,
+                solver->settings->obs_margin);
+        }
+
         // Project slack variables into feasible domain
         update_slack(solver);
 
-        // NEW: PSD projector (prints per-stage eigmins)
+        // NEW: PSD projector (prints per-stage eigmins). Guard non-finite input.
         update_psd_slack(solver);
 
         // Compute next iteration of dual variables
