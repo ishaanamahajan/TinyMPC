@@ -3,7 +3,7 @@
 #include <Eigen/Dense>
 #include "admm.hpp"
 #include "rho_benchmark.hpp"    
-#include "psd_support.hpp"
+#include "tv_constraints.hpp"
 #include <cmath>
 
 #define DEBUG_MODULE "TINYALG"
@@ -62,24 +62,13 @@ tinyVector project_soc(tinyVector s, float mu) {
     }
 }
 
-// Project onto half-space { z | a^T z <= b } with guards
-static inline tinyVector project_halfspace_leq(const tinyVector& z,
-                                               const tinyVector& a,
-                                               tinytype b) {
-    tinytype anorm2 = a.squaredNorm();
-    if (!(std::isfinite(anorm2)) || anorm2 <= tinytype(1e-12)) {
-        return z; // ill-posed row; skip
-    }
-    tinytype val = a.dot(z);
-    if (!(std::isfinite(val))) return z;
-    if (val <= b) return z; // already feasible
-    tinytype step = (val - b) / anorm2;
-    if (!(std::isfinite(step))) return z;
-    // Optional clamp to avoid extreme jumps
-    const tinytype clamp_val = 1e3;
-    if (step > clamp_val) step = clamp_val;
-    if (step < -clamp_val) step = -clamp_val;
-    return z - step * a;
+/**
+ * Project a vector z onto a hyperplane defined by a^T z = b
+ * Implements Π_H(z) = z - (⟨z, a⟩ − b)/||a||² * a
+ */
+tinyVector project_hyperplane(const tinyVector& z, const tinyVector& a, tinytype b) {
+    tinytype dist = (a.dot(z) - b) / a.squaredNorm();
+    return z - dist * a;
 }
 
 // ---------- PSD utilities ----------
@@ -308,9 +297,12 @@ void update_slack(TinySolver *solver)
     if (solver->settings->en_state_linear) {
         for (int i=0; i<solver->work->N; i++) {
             for (int k=0; k<solver->work->numStateLinear; k++) {
-                tinyVector a = solver->work->Alin_x.row(k).transpose();
+                tinyVector a = solver->work->Alin_x.row(k);
                 tinytype b = solver->work->blin_x(k);
-                solver->work->vlnew.col(i) = project_halfspace_leq(solver->work->vlnew.col(i), a, b);
+                tinytype constraint_value = a.dot(solver->work->vlnew.col(i));
+                if (constraint_value > b) {
+                    solver->work->vlnew.col(i) = project_hyperplane(solver->work->vlnew.col(i), a, b);
+                }
             }
         }
     }
@@ -319,9 +311,12 @@ void update_slack(TinySolver *solver)
     if (solver->settings->en_input_linear) {
         for (int i=0; i<solver->work->N-1; i++) {
             for (int k=0; k<solver->work->numInputLinear; k++) {
-                tinyVector a = solver->work->Alin_u.row(k).transpose();
+                tinyVector a = solver->work->Alin_u.row(k);
                 tinytype b = solver->work->blin_u(k);
-                solver->work->zlnew.col(i) = project_halfspace_leq(solver->work->zlnew.col(i), a, b);
+                tinytype constraint_value = a.dot(solver->work->zlnew.col(i));
+                if (constraint_value > b) {
+                    solver->work->zlnew.col(i) = project_hyperplane(solver->work->zlnew.col(i), a, b);
+                }
             }
         }
     }
@@ -339,32 +334,13 @@ void update_slack(TinySolver *solver)
     // Time-varying Linear constraints on state
     if (solver->settings->en_tv_state_linear) {
         for (int i=0; i<solver->work->N; i++) {
-            // Sanitize current column to avoid NaN propagation
-            if (!solver->work->vlnew_tv.col(i).allFinite()) {
-                if (solver->work->x.col(i).allFinite()) {
-                    solver->work->vlnew_tv.col(i) = solver->work->x.col(i);
-                } else {
-                    solver->work->vlnew_tv.col(i).setZero();
-                }
-            }
             const int nc = solver->work->numtvStateLinear;
             for (int k=0; k<nc; k++) {
-                int row = i*nc + k;
-                tinyVector a = solver->work->tv_Alin_x.row(row).transpose();
+                tinyVector a = solver->work->tv_Alin_x.row((solver->work->numtvStateLinear*i) + k);
                 tinytype b = solver->work->tv_blin_x(k,i);
-                solver->work->vlnew_tv.col(i) = project_halfspace_leq(solver->work->vlnew_tv.col(i), a, b);
-            }
-            // Cheap invariant/log (sample a few i to avoid spam)
-            if ((i == 0 || i == solver->work->N/2) && nc > 0) {
-                int row = i*nc + 0;
-                tinyVector a = solver->work->tv_Alin_x.row(row).transpose();
-                tinytype b = solver->work->tv_blin_x(0,i);
-                tinytype val = a.dot(solver->work->vlnew_tv.col(i));
-                if (!std::isfinite(val) || !std::isfinite(b) || a.squaredNorm() <= 1e-12) {
-                    std::cout << "[TV-LIN] i="<<i<<" bad row: ||a||^2="<<a.squaredNorm()
-                              <<" val="<<val<<" b="<<b<<"\n";
-                } else {
-                    std::cout << "[TV-LIN] i="<<i<<" residual="<<(val - b) << "\n";
+                tinytype constraint_value = a.dot(solver->work->vlnew_tv.col(i));
+                if (constraint_value > b) {
+                    solver->work->vlnew_tv.col(i) = project_hyperplane(solver->work->vlnew_tv.col(i), a, b);
                 }
             }
         }
@@ -375,10 +351,12 @@ void update_slack(TinySolver *solver)
         for (int i=0; i<solver->work->N-1; i++) {
             const int nc = solver->work->numtvInputLinear;
             for (int k=0; k<nc; k++) {
-                int row = i*nc + k;
-                tinyVector a = solver->work->tv_Alin_u.row(row).transpose();
+                tinyVector a = solver->work->tv_Alin_u.row((solver->work->numtvInputLinear*i) + k);
                 tinytype b = solver->work->tv_blin_u(k,i);
-                solver->work->zlnew_tv.col(i) = project_halfspace_leq(solver->work->zlnew_tv.col(i), a, b);
+                tinytype constraint_value = a.dot(solver->work->zlnew_tv.col(i));
+                if (constraint_value > b) {
+                    solver->work->zlnew_tv.col(i) = project_hyperplane(solver->work->zlnew_tv.col(i), a, b);
+                }
             }
         }
     }

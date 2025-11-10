@@ -3,11 +3,11 @@
 #include <limits>
 #include <Eigen/Dense>
 #include <tinympc/tiny_api.hpp>
-#include "../src/tinympc/psd_support.hpp" // for TV linearization helpers
+#include <cmath>
 
 #define NX 4
 #define NU 2
-#define N  31
+#define NHORIZON 31
 
 extern "C" int main() {
     using Mat = Eigen::Matrix<tinytype, Eigen::Dynamic, Eigen::Dynamic>;
@@ -28,18 +28,18 @@ extern "C" int main() {
     TinySolver *solver = nullptr;
     int status = tiny_setup(&solver,
                             Ad, Bd, fdyn, Q, R,
-                            /*rho*/ tinytype(12.0), NX, NU, N,
+                            /*rho*/ tinytype(12.0), NX, NU, NHORIZON,
                             /*verbose=*/1);
     if (status) return status;
 
     // Bounds: cap base states/controls
-    Mat x_min = Mat::Constant(NX, N, -std::numeric_limits<tinytype>::infinity());
-    Mat x_max = Mat::Constant(NX, N,  std::numeric_limits<tinytype>::infinity());
+    Mat x_min = Mat::Constant(NX, NHORIZON, -std::numeric_limits<tinytype>::infinity());
+    Mat x_max = Mat::Constant(NX, NHORIZON,  std::numeric_limits<tinytype>::infinity());
     x_min.topRows(NX).setConstant(-30.0);
     x_max.topRows(NX).setConstant( 30.0);
 
-    Mat u_min = Mat::Constant(NU, N-1, -std::numeric_limits<tinytype>::infinity());
-    Mat u_max = Mat::Constant(NU, N-1,  std::numeric_limits<tinytype>::infinity());
+    Mat u_min = Mat::Constant(NU, NHORIZON-1, -std::numeric_limits<tinytype>::infinity());
+    Mat u_max = Mat::Constant(NU, NHORIZON-1,  std::numeric_limits<tinytype>::infinity());
     u_min.setConstant(-3.0);
     u_max.setConstant( 3.0);
     tiny_set_bound_constraints(solver, x_min, x_max, u_min, u_max);
@@ -49,24 +49,37 @@ extern "C" int main() {
     tiny_set_x0(solver, x0);
 
     // No linear references (pure quadratic cost)
-    tiny_set_x_ref(solver, Mat::Zero(NX, N));
-    tiny_set_u_ref(solver, Mat::Zero(NU, N-1));
+    tiny_set_x_ref(solver, Mat::Zero(NX, NHORIZON));
+    tiny_set_u_ref(solver, Mat::Zero(NU, NHORIZON-1));
 
-    // Enable time-varying base tangent half-spaces around a circular obstacle
+    // Enable TV-linear obstacle avoidance using only built-in API.
+    // Allocate 1 state TV-linear row per stage; ADMM updates tangents each iter.
     const tinytype ox = -5.0, oy = 0.0, r = 2.0, margin = 0.0;
-    tiny_enable_base_tangent_avoidance(solver, ox, oy, r, margin);
+    tinyMatrix tvA = tinyMatrix::Zero(1 * solver->work->N, solver->work->nx);
+    tinyMatrix tvb = tinyMatrix::Zero(1, solver->work->N);
+    tiny_set_tv_linear_constraints(
+        solver,
+        tvA, tvb,
+        tinyMatrix::Zero(0, solver->work->nu),
+        tinyMatrix::Zero(0, solver->work->N-1));
+    solver->settings->en_tv_state_linear = 1;
+    solver->settings->en_base_tangent_tv = 1;
+    solver->settings->obs_x = ox;
+    solver->settings->obs_y = oy;
+    solver->settings->obs_r = r;
+    solver->settings->obs_margin = margin;
 
     // Solve
     tiny_solve(solver);
 
-    // Export solution to CSV
-    std::ofstream csv_file("../tv_linear_trajectory.csv");
+    // Export solution to CSV (repo root)
+    std::ofstream csv_file("tv_linear_trajectory.csv");
     if (csv_file.is_open()) {
         csv_file << "k,x1,x2,x3,x4,u1,u2\n";
-        for (int k = 0; k < N; ++k) {
+        for (int k = 0; k < NHORIZON; ++k) {
             Vec xk = solver->solution->x.col(k);
             csv_file << k << "," << xk(0) << "," << xk(1) << "," << xk(2) << "," << xk(3);
-            if (k < N-1) {
+            if (k < NHORIZON-1) {
                 Vec uk = solver->solution->u.col(k);
                 csv_file << "," << uk(0) << "," << uk(1) << "\n";
             } else {
@@ -74,9 +87,8 @@ extern "C" int main() {
             }
         }
         csv_file.close();
-        std::cout << "\n[EXPORT] TV-linear trajectory saved to ../tv_linear_trajectory.csv\n";
+        std::cout << "\n[EXPORT] TV-linear trajectory saved to tv_linear_trajectory.csv\n";
     }
 
     return 0;
 }
-

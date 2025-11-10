@@ -69,6 +69,67 @@ inline int tiny_enable_psd(TinySolver* solver, int nx0, int nu0, tinytype rho_ps
     return 0;
 }
 
+
+// Enable non-time-varying linear state constraints with n_constr rows
+inline int tiny_enable_state_linear(TinySolver* solver, int n_constr) {
+    if (!solver) { std::cout << "tiny_enable_state_linear: solver nullptr\n"; return 1; }
+    solver->settings->en_state_linear = 1;
+    solver->work->numStateLinear = n_constr;
+    solver->work->Alin_x = tinyMatrix::Zero(n_constr, solver->work->nx);
+    solver->work->blin_x = tinyVector::Zero(n_constr);
+    // Initialize associated slack/dual storage
+    solver->work->vlnew = solver->work->x;
+    solver->work->gl    = tinyMatrix::Zero(solver->work->nx, solver->work->N);
+    return 0;
+}
+
+// Pure-PSD variant: add lifted disk constraints (no TV relinearization)
+// Each disk j with center (ox,oy) and radius r contributes a row
+// m^T [x; vec(XX)] >= n  where m = [-2ox, -2oy, e11, e22] and n = r^2 - ||o||^2.
+// We store a^T z <= b via a = -m, b = -n into Alin_x, blin_x and enable en_state_linear.
+inline int tiny_set_lifted_disks(
+    TinySolver* solver,
+    const std::vector<std::array<tinytype,3>>& disks)
+{
+    if (!solver) { std::cout << "tiny_set_lifted_disks: solver nullptr\n"; return 1; }
+    const int nx0 = solver->settings->nx0_psd;
+    const int nxL = solver->work->nx;
+    if (nx0 <= 0) { std::cout << "tiny_set_lifted_disks: nx0_psd not set (>0)\n"; return 1; }
+    const int m = static_cast<int>(disks.size());
+    if (m == 0) return 0;
+
+    tinyMatrix Alin_x = tinyMatrix::Zero(m, nxL);
+    tinyVector blin_x = tinyVector::Zero(m);
+
+    const int idx_xx11 = nx0 + 0 + 0*nx0;
+    const int idx_xx22 = nx0 + 1 + 1*nx0;
+
+    for (int j = 0; j < m; ++j) {
+        const tinytype ox = disks[j][0];
+        const tinytype oy = disks[j][1];
+        const tinytype r  = disks[j][2];
+
+        tinyVector mrow = tinyVector::Zero(nxL);
+        mrow(0) = -2 * ox; mrow(1) = -2 * oy;
+        mrow(idx_xx11) = 1; mrow(idx_xx22) = 1;
+        tinytype n = (r*r - (ox*ox + oy*oy));
+
+        tinyVector a = -mrow;
+        tinytype   b = -n;
+        Alin_x.row(j) = a.transpose();
+        blin_x(j) = b;
+    }
+
+    // Enable and set in solver
+    tiny_enable_state_linear(solver, m);
+    return tiny_set_linear_constraints(
+        solver,
+        Alin_x,
+        blin_x,
+        tinyMatrix::Zero(0, solver->work->nu),
+        tinyVector::Zero(0));
+}
+
 // ---------------- Time-varying linear constraint helpers --------------------
 inline int tiny_enable_tv_state_linear(TinySolver* solver, int n_constr) {
     if (!solver) { std::cout << "tiny_enable_tv_state_linear: solver nullptr\n"; return 1; }
@@ -131,86 +192,6 @@ inline int tiny_enable_base_tangent_avoidance(
     solver->settings->obs_r = r;
     solver->settings->obs_margin = margin;
     return 0;
-}
-
-// Enable non-time-varying linear state constraints with n_constr rows
-inline int tiny_enable_state_linear(TinySolver* solver, int n_constr) {
-    if (!solver) { std::cout << "tiny_enable_state_linear: solver nullptr\n"; return 1; }
-    solver->settings->en_state_linear = 1;
-    solver->work->numStateLinear = n_constr;
-    solver->work->Alin_x = tinyMatrix::Zero(n_constr, solver->work->nx);
-    solver->work->blin_x = tinyVector::Zero(n_constr);
-    // Initialize associated slack/dual storage
-    solver->work->vlnew = solver->work->x;
-    solver->work->gl    = tinyMatrix::Zero(solver->work->nx, solver->work->N);
-    return 0;
-}
-
-// Pure-PSD variant: add lifted disk constraints (no TV relinearization)
-// Each disk j with center (ox,oy) and radius r contributes a row
-// m^T [x; vec(XX)] >= n  where m = [-2ox, -2oy, e11, e22] and n = r^2 - ||o||^2.
-// We store a^T z <= b via a = -m, b = -n into Alin_x, blin_x and enable en_state_linear.
-inline int tiny_set_lifted_disks(
-    TinySolver* solver,
-    const std::vector<std::array<tinytype,3>>& disks)
-{
-    if (!solver) { std::cout << "tiny_set_lifted_disks: solver nullptr\n"; return 1; }
-    const int nx0 = solver->settings->nx0_psd;
-    const int nxL = solver->work->nx;
-    if (nx0 <= 0) { std::cout << "tiny_set_lifted_disks: nx0_psd not set (>0)\n"; return 1; }
-    const int m = static_cast<int>(disks.size());
-    if (m == 0) return 0;
-
-    tinyMatrix Alin_x = tinyMatrix::Zero(m, nxL);
-    tinyVector blin_x = tinyVector::Zero(m);
-
-    const int idx_xx11 = nx0 + 0 + 0*nx0;
-    const int idx_xx22 = nx0 + 1 + 1*nx0;
-
-    for (int j = 0; j < m; ++j) {
-        const tinytype ox = disks[j][0];
-        const tinytype oy = disks[j][1];
-        const tinytype r  = disks[j][2];
-
-        tinyVector mrow = tinyVector::Zero(nxL);
-        mrow(0) = -2 * ox; mrow(1) = -2 * oy;
-        mrow(idx_xx11) = 1; mrow(idx_xx22) = 1;
-        tinytype n = (r*r - (ox*ox + oy*oy));
-
-        tinyVector a = -mrow;
-        tinytype   b = -n;
-        Alin_x.row(j) = a.transpose();
-        blin_x(j) = b;
-    }
-
-    // Enable and set in solver
-    tiny_enable_state_linear(solver, m);
-    return tiny_set_linear_constraints(
-        solver,
-        Alin_x,
-        blin_x,
-        tinyMatrix::Zero(0, solver->work->nu),
-        tinyVector::Zero(0));
-}
-
-inline void tiny_set_circle_avoidance(TinySolver* solver, tinytype ox, tinytype oy, tinytype r) {
-    const int nx0 = solver->settings->nx0_psd; // base state dim
-    const int nxL = solver->work->nx;          // lifted state dim
-    const int N   = solver->work->N;
-
-    tinyVector m = tinyVector::Zero(nxL);
-    m(0) = -2 * ox; m(1) = -2 * oy;
-    const int idx_xx11 = nx0 + 0 + 0*nx0;
-    const int idx_xx22 = nx0 + 1 + 1*nx0;
-    m(idx_xx11) = 1; m(idx_xx22) = 1;
-    // From (x-obs)'(x-obs) >= r^2  => (x'x - 2 obs'x) >= r^2 - ||obs||^2
-    tinytype n = (r*r - (ox*ox + oy*oy));
-
-    tinyVector a = -m; tinytype b = -n; // a^T z <= b
-    for (int k = 0; k < N; ++k) {
-        solver->work->tv_Alin_x.row(k * 1 + 0) = a.transpose();
-        solver->work->tv_blin_x(0, k) = b;
-    }
 }
 
 // Optional: base corridor x >= xmin as a second TV-linear constraint row
