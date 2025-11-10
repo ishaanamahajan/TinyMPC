@@ -86,9 +86,39 @@ extern "C" int main() {
 
     tiny_set_x0(solver, x0_lift);
 
-    // No linear reference terms
-    tiny_set_x_ref(solver, Mat::Zero(nxL, N));
-    tiny_set_u_ref(solver, Mat::Zero(nuL, N-1));
+    // Linear lift-costs (make demo closer to julia_sdp.jl):
+    // Add linear terms on diag(XX) and diag(UU) via Xref/Uref.
+    // Encoding: q = -(Q .* Xref), r = -(R .* Uref) in update_linear_cost.
+    {
+        const int nx0 = NX0, nu0 = NU0;
+        const int nxu_loc = nx0*nu0, nux_loc = nu0*nx0;
+        const int baseUU = nu0 + nxu_loc + nux_loc; // start index of vec(UU)
+        const tinytype q_xx = tinytype(0.8);  // linear weight on diag(XX)
+        const tinytype r_uu = tinytype(10.0); // linear weight on diag(UU)
+
+        Mat Xref = Mat::Zero(nxL, N);
+        Mat Uref = Mat::Zero(nuL, N-1);
+
+        // State: put q_xx on XX_ii by setting Xref(ii) = -q_xx / Q(ii)
+        for (int k = 0; k < N; ++k) {
+            for (int i = 0; i < nx0; ++i) {
+                int idx_xx_ii = nx0 + i*nx0 + i;
+                tinytype denom = solver->work->Q(idx_xx_ii);
+                if (denom != tinytype(0)) Xref(idx_xx_ii, k) = -q_xx / denom;
+            }
+        }
+
+        // Input: put r_uu on UU_jj via Uref
+        for (int k = 0; k < N-1; ++k) {
+            for (int j = 0; j < nu0; ++j) {
+                int idx_uu_jj = baseUU + j*nu0 + j;
+                tinytype denom = solver->work->R(idx_uu_jj);
+                if (denom != tinytype(0)) Uref(idx_uu_jj, k) = -r_uu / denom;
+            }
+        }
+        tiny_set_x_ref(solver, Xref);
+        tiny_set_u_ref(solver, Uref);
+    }
 
     // Pure-PSD variant: lifted disks (no TV tangents)
     const tinytype ox = -5.0, oy = 0.0, r = 2.0;
