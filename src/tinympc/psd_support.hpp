@@ -314,6 +314,35 @@ inline int tiny_add_rlt_position_xx(TinySolver* solver)
     return tiny_append_state_linear_rows(solver, Aadd, Badd);
 }
 
+// Add only diagonal RLT caps for position block: w_ii <= (u_i + l_i) x_i - u_i l_i
+inline int tiny_add_rlt_position_xx_diag_only(TinySolver* solver)
+{
+    if (!solver) { std::cout << "tiny_add_rlt_position_xx_diag_only: solver nullptr\n"; return 1; }
+    const int nx0 = solver->settings->nx0_psd;
+    if (nx0 < 2) { std::cout << "tiny_add_rlt_position_xx_diag_only: nx0_psd<2\n"; return 1; }
+    const int nxL = solver->work->nx;
+
+    auto get_bounds = [&](int idx)->std::pair<tinytype,tinytype>{
+        tinytype l = solver->work->x_min(idx, 0);
+        tinytype u = solver->work->x_max(idx, 0);
+        return {l,u};
+    };
+    auto idx_xx = [&](int i, int j)->int { return nx0 + j*nx0 + i; };
+
+    const int m = 2; // only i=0,1
+    tinyMatrix Aadd = tinyMatrix::Zero(m, nxL);
+    tinyVector Badd = tinyVector::Zero(m);
+    for (int i = 0; i < 2; ++i) {
+        auto [li, ui] = get_bounds(i);
+        tinyVector a = tinyVector::Zero(nxL);
+        a(i) = -(ui + li);
+        a(idx_xx(i,i)) = 1.0;
+        Aadd.row(i) = a.transpose();
+        Badd(i) = -ui*li;
+    }
+    return tiny_append_state_linear_rows(solver, Aadd, Badd);
+}
+
 inline void tiny_set_circle_avoidance(TinySolver* solver, tinytype ox, tinytype oy, tinytype r) {
     const int nx0 = solver->settings->nx0_psd; // base state dim
     const int nxL = solver->work->nx;          // lifted state dim

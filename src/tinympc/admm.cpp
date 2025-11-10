@@ -615,6 +615,8 @@ int solve(TinySolver *solver)
 
         solver->work->iter += 1;
 
+        // PSD rho schedule disabled: keep rho_psd fixed for this experiment
+
         // Handle adaptive rho if enabled
         if (solver->settings->adaptive_rho) {
             // Calculate residuals for adaptive rho

@@ -33,7 +33,7 @@ extern "C" int main() {
     Mat R = Mat::Zero(nuL, nuL);
     const int nxu = NX0*NU0, nux = NU0*NX0, nuu = NU0*NU0;
     // Base input: moderate cost
-    R.diagonal().head(NU0).array() = tinytype(2.0);
+    R.diagonal().head(NU0).array() = tinytype(1.5);
     // Lifted input blocks: r_xx ~ 10 on XU/UX, R_xx ~ 500 on UU
     R.diagonal().segment(NU0, nxu).array() = tinytype(10.0);            // vec(XU)
     R.diagonal().segment(NU0 + nxu, nux).array() = tinytype(10.0);      // vec(UX)
@@ -43,7 +43,7 @@ extern "C" int main() {
     TinySolver *solver = nullptr;
     int status = tiny_setup(&solver,
                             A, B, fdyn, Q, R,
-                            /*rho*/ tinytype(12.0), nxL, nuL, N,
+                            /*rho*/ tinytype(8.0), nxL, nuL, N,
                             /*verbose=*/1); // prints A,B,Q,R, Kinf, Pinf
     if (status) return status;
 
@@ -52,9 +52,22 @@ extern "C" int main() {
     Mat x_max = Mat::Constant(nxL, N,  std::numeric_limits<tinytype>::infinity());
     x_min.topRows(NX0).setConstant(-30.0);
     x_max.topRows(NX0).setConstant( 30.0);
+    // Tighter position bounds to strengthen RLT caps
+    x_min.row(0).setConstant(-12.0); x_max.row(0).setConstant(11.999);    // x
+    x_min.row(1).setConstant( -6.0); x_max.row(1).setConstant( 6.0);    // y
     // Gentle caps on vec(XX)
     x_min.middleRows(NX0, NX0*NX0).setConstant(-1000.0);
     x_max.middleRows(NX0, NX0*NX0).setConstant( 1000.0);
+
+    // Clamp terminal base velocities to ~0 to avoid dithering at the goal
+    const int kT = N-1 ; // terminal stage column index
+    const tinytype v_eps = tinytype(1e-4);
+    const tinytype eps_xy = tinytype(1e-4);
+    // rows: 0=x, 1=y, 2=vx, 3=vy
+    x_min(2, kT) = -v_eps; x_max(2, kT) = v_eps; // vx_T ≈ 0
+    x_min(3, kT) = -v_eps; x_max(3, kT) = v_eps; // vy_T ≈ 0
+    x_min(0,kT) = -eps_xy;  x_max(0,kT) =  eps_xy;   // x_T ≈ 0
+    x_min(1,kT) = -eps_xy;  x_max(1,kT) =  eps_xy;   // y_T ≈ 0
 
     Mat u_min = Mat::Constant(nuL, N-1, -std::numeric_limits<tinytype>::infinity());
     Mat u_max = Mat::Constant(nuL, N-1,  std::numeric_limits<tinytype>::infinity());
@@ -65,11 +78,10 @@ extern "C" int main() {
     u_max.bottomRows(nxu + nux + nuu).setConstant( 1000.0);
     tiny_set_bound_constraints(solver, x_min, x_max, u_min, u_max);
 
-    // Enable PSD coupling with a small rho_psd initially (0.5–1.0)
+    // Enable PSD coupling with a small rho_psd initially (gentle start)
     const bool ENABLE_PSD = true;
     if (ENABLE_PSD) {
-        // Start modest; can ramp to 5 later if calm
-        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(3.0));
+        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(1.0));
     }
 
     // Lifted initial condition: [x0; vec(x0*x0')]
@@ -86,14 +98,43 @@ extern "C" int main() {
 
     tiny_set_x0(solver, x0_lift);
 
-    // No linear reference terms
-    tiny_set_x_ref(solver, Mat::Zero(nxL, N));
-    tiny_set_u_ref(solver, Mat::Zero(nuL, N-1));
+    // ---- Linear lift costs like Julia/MOSEK via Xref/Uref ----
+    {
+        const int nx0 = NX0, nu0 = NU0;
+        const int nxu_loc = nx0*nu0, nux_loc = nu0*nx0;
+        const int baseUU = nu0 + nxu_loc + nux_loc; // start index of vec(UU)
+        const tinytype q_xx = tinytype(0.8);  // linear on diag(XX)
+        const tinytype r_uu = tinytype(10.0); // linear on diag(UU)
+
+        Mat Xref = Mat::Zero(nxL, N);
+        Mat Uref = Mat::Zero(nuL, N-1);
+        // State: add q_xx on XX_ii via Xref
+        for (int k = 0; k < N; ++k) {
+            for (int i = 0; i < nx0; ++i) {
+                int idx_xx_ii = nx0 + i*nx0 + i;
+                tinytype denom = solver->work->Q(idx_xx_ii);
+                if (denom != tinytype(0)) Xref(idx_xx_ii, k) = -q_xx / denom;
+            }
+        }
+        // Input: add r_uu on UU_jj via Uref
+        for (int k = 0; k < N-1; ++k) {
+            for (int j = 0; j < nu0; ++j) {
+                int idx_uu_jj = baseUU + j*nu0 + j;
+                tinytype denom = solver->work->R(idx_uu_jj);
+                if (denom != tinytype(0)) Uref(idx_uu_jj, k) = -r_uu / denom;
+            }
+        }
+        tiny_set_x_ref(solver, Xref);
+        tiny_set_u_ref(solver, Uref);
+    }
 
     // Pure-PSD variant: lifted disks + light RLT (no TV tangents)
     const tinytype ox = -5.0, oy = 0.0, r = 2.0;
-    std::vector<std::array<tinytype,3>> disks = {{ {ox, oy, r} }}; // one circle
+    const tinytype r_margin = tinytype(0.0);
+    // Single disk with small margin
+    std::vector<std::array<tinytype,3>> disks = {{ {ox, oy, r + r_margin} }};
     tiny_set_lifted_disks(solver, disks);
+    // Full RLT (McCormick) rows on (x,y) block for tighter relaxation
     tiny_add_rlt_position_xx(solver);
 
     // Solve once—watch the PSD eigen prints
