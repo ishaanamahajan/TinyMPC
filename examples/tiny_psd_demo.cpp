@@ -69,7 +69,7 @@ extern "C" int main() {
     const bool ENABLE_PSD = true;
     if (ENABLE_PSD) {
         // Start modest; can ramp to 5 later if calm
-        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(3.0));
+        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(1.2));
     }
 
     // Lifted initial condition: [x0; vec(x0*x0')]
