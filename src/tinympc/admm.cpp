@@ -82,10 +82,7 @@ static inline tinyVector project_halfspace_leq(const tinyVector& z,
     return z - step * a;
 }
 
-// ---------- PSD utilities ----------
-static inline void symm_to_vec(const tinyMatrix& S, tinyVector& v) {
-    Eigen::Map<tinyMatrix>(v.data(), S.rows(), S.cols()) = S;  // col-major
-}
+// ---------- PSD utilities (svec/smat live in psd_support.hpp) ----------
 
 static inline void assemble_psd_block(TinySolver* solver, int k, tinyMatrix& M, bool last)
 {
@@ -151,8 +148,8 @@ void update_psd_slack(TinySolver *solver)
         tinyMatrix M(psd_dim, psd_dim);
         assemble_psd_block(solver, k, M, last);
 
-        tinyMatrix Hk = Eigen::Map<const tinyMatrix>(
-            solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
+        tinyMatrix Hk(psd_dim, psd_dim);
+        smat_inplace(solver->work->Hpsd.col(k), psd_dim, Hk);
 
         // Guard against non-finite input to the eigen solver
         if (!M.allFinite() || !Hk.allFinite()) {
@@ -184,8 +181,8 @@ void update_psd_slack(TinySolver *solver)
         tinyMatrix Mproj = es.eigenvectors() * lam.asDiagonal() * es.eigenvectors().transpose();
         Mproj *= scale; // unscale
 
-        tinyVector col(psd_dim*psd_dim);
-        symm_to_vec(Mproj, col);
+        tinyVector col(svec_size(psd_dim));
+        svec_inplace(Mproj, col);
         solver->work->Spsd_new.col(k) = col;
 
         std::cout << "[PSD] k=" << k
@@ -208,10 +205,10 @@ void update_psd_dual(TinySolver *solver)
         tinyMatrix M(psd_dim, psd_dim);
         assemble_psd_block(solver, k, M, last);
 
-        tinyMatrix Hk = Eigen::Map<const tinyMatrix>(
-            solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
-        tinyMatrix Snew = Eigen::Map<const tinyMatrix>(
-            solver->work->Spsd_new.col(k).data(), psd_dim, psd_dim);
+        tinyMatrix Hk(psd_dim, psd_dim);
+        tinyMatrix Snew(psd_dim, psd_dim);
+        smat_inplace(solver->work->Hpsd.col(k), psd_dim, Hk);
+        smat_inplace(solver->work->Spsd_new.col(k), psd_dim, Snew);
 
         // Under-relaxed dual update to improve stability
         const tinytype gamma_psd = 0.2;
@@ -228,7 +225,9 @@ void update_psd_dual(TinySolver *solver)
                 Hk(r,c) = v;
             }
         }
-        tinyVector tmpH(psd_dim*psd_dim); symm_to_vec(Hk, tmpH); solver->work->Hpsd.col(k) = tmpH;
+        tinyVector tmpH(svec_size(psd_dim));
+        svec_inplace(Hk, tmpH);
+        solver->work->Hpsd.col(k) = tmpH;
     }
 }
 
@@ -486,10 +485,10 @@ void update_linear_cost(TinySolver *solver)
         for (int k = 0; k < solver->work->N; ++k)
         {
             const bool last = (k == solver->work->N-1);
-            tinyMatrix Snew = Eigen::Map<const tinyMatrix>(
-                solver->work->Spsd_new.col(k).data(), psd_dim, psd_dim);
-            tinyMatrix Hk = Eigen::Map<const tinyMatrix>(
-                solver->work->Hpsd.col(k).data(), psd_dim, psd_dim);
+            tinyMatrix Snew(psd_dim, psd_dim);
+            tinyMatrix Hk(psd_dim, psd_dim);
+            smat_inplace(solver->work->Spsd_new.col(k), psd_dim, Snew);
+            smat_inplace(solver->work->Hpsd.col(k), psd_dim, Hk);
 
             const tinyMatrix T = Snew - Hk; // "znew - y" analog
             if (!T.allFinite()) continue; // guard

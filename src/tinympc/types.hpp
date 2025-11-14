@@ -222,10 +222,11 @@ typedef struct {
     // Temporaries
     tinyVector Qu;      // nu x 1
 
-    // PSD constraint variables
-    tinyMatrix Spsd;     // PSD slack variables (psd_dim^2 x N)
-    tinyMatrix Spsd_new; // Updated PSD slack variables (psd_dim^2 x N)
-    tinyMatrix Hpsd;     // PSD dual variables (psd_dim^2 x N)
+    // PSD constraint variables (stored in half-vectorized form)
+    // Each column has length m = psd_dim * (psd_dim + 1) / 2
+    tinyMatrix Spsd;     // PSD slack variables (m x N)
+    tinyMatrix Spsd_new; // Updated PSD slack variables (m x N)
+    tinyMatrix Hpsd;     // PSD dual variables (m x N)
 
     // Variables for keeping track of solve status
     tinytype primal_residual_state;

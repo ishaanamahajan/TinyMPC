@@ -4,7 +4,44 @@
 #include <iostream>
 #include <vector>
 #include <array>
+#include <cmath>
 #include <tinympc/tiny_api.hpp>
+
+// ---------------- svec/smat (half-vectorization with sqrt(2) scaling) -----------------
+// Packs a symmetric p x p matrix S into a length m = p(p+1)/2 vector v
+// using column-wise lower-triangular order: [S(0,0), S(1,0)*sqrt2, ..., S(p-1,0)*sqrt2,
+//                                            S(1,1), S(2,1)*sqrt2, ..., S(p-1,1)*sqrt2, ...]
+// Off-diagonals are scaled by sqrt(2) so that:  trace(A^T B) = svec(A)^T svec(B)
+inline int svec_size(int p) { return p * (p + 1) / 2; }
+
+inline void smat_inplace(const tinyVector& v, int p, tinyMatrix& S) {
+    S.setZero(p, p);
+    const tinytype sqrt2 = tinytype(M_SQRT2);
+    int idx = 0;
+    for (int c = 0; c < p; ++c) {
+        // diagonal
+        S(c, c) = v(idx++);
+        // below diagonal (rows r > c)
+        for (int r = c + 1; r < p; ++r) {
+            tinytype x = v(idx++) / sqrt2; // invert scaling
+            S(r, c) = x;
+            S(c, r) = x;
+        }
+    }
+}
+
+inline void svec_inplace(const tinyMatrix& S, tinyVector& v) {
+    const int p = S.rows();
+    const tinytype sqrt2 = tinytype(M_SQRT2);
+    v.setZero(svec_size(p));
+    int idx = 0;
+    for (int c = 0; c < p; ++c) {
+        v(idx++) = S(c, c);
+        for (int r = c + 1; r < p; ++r) {
+            v(idx++) = sqrt2 * S(r, c);
+        }
+    }
+}
 
 // Manual Kronecker product implementation
 template<typename Derived1, typename Derived2>
@@ -59,13 +96,15 @@ inline int tiny_enable_psd(TinySolver* solver, int nx0, int nu0, tinytype rho_ps
 
     const int psd_dim = 1 + nx0 + nu0;
     const int N = solver->work->N;
+    const int m = svec_size(psd_dim);
 
-    solver->work->Spsd     = tinyMatrix::Zero(psd_dim*psd_dim, N);
-    solver->work->Spsd_new = tinyMatrix::Zero(psd_dim*psd_dim, N);
-    solver->work->Hpsd     = tinyMatrix::Zero(psd_dim*psd_dim, N);
+    solver->work->Spsd     = tinyMatrix::Zero(m, N);
+    solver->work->Spsd_new = tinyMatrix::Zero(m, N);
+    solver->work->Hpsd     = tinyMatrix::Zero(m, N);
 
     std::cout << "[PSD] Enabled: nx0=" << nx0 << " nu0=" << nu0
-              << " psd_dim=" << psd_dim << " rho_psd=" << rho_psd << "\n";
+              << " psd_dim=" << psd_dim << " (half m=" << m << ")"
+              << " rho_psd=" << rho_psd << "\n";
     return 0;
 }
 

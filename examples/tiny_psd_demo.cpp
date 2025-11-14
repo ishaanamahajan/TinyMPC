@@ -68,8 +68,8 @@ extern "C" int main() {
     // Enable PSD coupling with a small rho_psd initially (0.5–1.0)
     const bool ENABLE_PSD = true;
     if (ENABLE_PSD) {
-        // Start modest; can ramp to 5 later if calm
-        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(1.2));
+        // Start modest with rho_psd = 1.2; can ramp to 5 later if calm
+        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(1.1));
     }
 
     // Lifted initial condition: [x0; vec(x0*x0')]
@@ -93,7 +93,7 @@ extern "C" int main() {
         const int nx0 = NX0, nu0 = NU0;
         const int nxu_loc = nx0*nu0, nux_loc = nu0*nx0;
         const int baseUU = nu0 + nxu_loc + nux_loc; // start index of vec(UU)
-        const tinytype q_xx = tinytype(0.8);  // linear weight on diag(XX)
+        const tinytype q_xx = tinytype(1.0);  // linear weight on diag(XX)
         const tinytype r_uu = tinytype(10.0); // linear weight on diag(UU)
 
         Mat Xref = Mat::Zero(nxL, N);
