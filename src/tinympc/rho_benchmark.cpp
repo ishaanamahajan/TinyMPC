@@ -1,4 +1,5 @@
 #include "rho_benchmark.hpp"
+#include "psd_support.hpp"
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -197,18 +198,9 @@ tinytype predict_rho(
 }
 
 void update_matrices_with_derivatives(TinyCache* cache, tinytype new_rho) {
-    tinytype delta_rho = new_rho - cache->rho;
-    
-
-
-    cache->Kinf = cache->Kinf + delta_rho * cache->dKinf_drho;
-    cache->Pinf = cache->Pinf + delta_rho * cache->dPinf_drho;
-    cache->C1 = cache->C1 + delta_rho * cache->dC1_drho;
-    cache->C2 = cache->C2 + delta_rho * cache->dC2_drho;
-
+    // Simple update without Taylor expansion - just update rho directly
+    // No cache matrix updates (Kinf, Pinf, etc.) - those stay constant
     cache->rho = new_rho;
-    
-
 }
 
 void benchmark_rho_adaptation(
@@ -226,6 +218,8 @@ void benchmark_rho_adaptation(
 ) {
     uint32_t start_time = micros();
     
+    tinytype initial_rho = cache->rho;
+    
     // Format matrices
     format_matrices(adapter, x_prev, u_prev, v_prev, z_prev, g_prev, y_prev, cache, work, N);
     
@@ -233,18 +227,92 @@ void benchmark_rho_adaptation(
     tinytype pri_res, dual_res, pri_norm, dual_norm;
     compute_residuals(adapter, &pri_res, &dual_res, &pri_norm, &dual_norm);
     
-    // Predict new rho
+    // Predict new rho using sqrt formula
     tinytype new_rho = predict_rho(adapter, pri_res, dual_res, pri_norm, dual_norm, cache->rho);
     
-    // Update matrices
-   update_matrices_with_derivatives(cache, new_rho);
+    // Simple update: just change rho, no cache matrix updates
+    cache->rho = new_rho;
     
     // Store results
     result->time_us = micros() - start_time;
-    result->initial_rho = cache->rho;
+    result->initial_rho = initial_rho;
     result->final_rho = new_rho;
     result->pri_res = pri_res;
     result->dual_res = dual_res;
     result->pri_norm = pri_norm;
     result->dual_norm = dual_norm;
+}
+
+// Forward declare assemble_psd_block from admm.cpp
+extern "C" void assemble_psd_block(TinySolver* solver, int k, tinyMatrix& M, bool last);
+
+void benchmark_rho_psd_adaptation(
+    RhoAdapter* adapter,
+    TinySolver* solver,
+    const tinyMatrix& Spsd_prev,
+    RhoBenchmarkResult* result
+) {
+    uint32_t start_time = micros();
+    
+    if (!solver->settings->en_psd) return;
+    
+    tinytype initial_rho = solver->cache->rho_psd;
+    
+    const int nx0 = solver->settings->nx0_psd;
+    const int nu0 = solver->settings->nu0_psd;
+    const int psd_dim = 1 + nx0 + nu0;
+    
+    // Compute PSD primal residual and norm
+    tinytype psd_pri_res = 0.0;
+    tinytype psd_pri_norm = 0.0;
+    for (int k = 0; k < solver->work->N; ++k) {
+        const bool last = (k == solver->work->N-1);
+        tinyMatrix M(psd_dim, psd_dim);
+        assemble_psd_block(solver, k, M, last);
+        
+        tinyMatrix Snew(psd_dim, psd_dim);
+        smat_inplace(solver->work->Spsd_new.col(k), psd_dim, Snew);
+        
+        tinytype res_k = (M - Snew).cwiseAbs().maxCoeff();
+        if (std::isfinite(res_k)) {
+            psd_pri_res = std::max(psd_pri_res, res_k);
+        }
+        
+        // Primal norm
+        tinytype M_norm = M.cwiseAbs().maxCoeff();
+        tinytype S_norm = Snew.cwiseAbs().maxCoeff();
+        if (std::isfinite(M_norm)) psd_pri_norm = std::max(psd_pri_norm, M_norm);
+        if (std::isfinite(S_norm)) psd_pri_norm = std::max(psd_pri_norm, S_norm);
+    }
+    
+    // Compute PSD dual residual and norm
+    tinytype psd_dua_res = 0.0;
+    tinytype psd_dua_norm = 0.0;
+    for (int k = 0; k < solver->work->N; ++k) {
+        tinytype res_k = (solver->work->Spsd_new.col(k) - Spsd_prev.col(k)).cwiseAbs().maxCoeff();
+        if (std::isfinite(res_k)) {
+            psd_dua_res = std::max(psd_dua_res, res_k);
+        }
+        
+        tinyMatrix Snew(psd_dim, psd_dim);
+        smat_inplace(solver->work->Spsd_new.col(k), psd_dim, Snew);
+        tinytype S_norm = Snew.cwiseAbs().maxCoeff();
+        if (std::isfinite(S_norm)) psd_dua_norm = std::max(psd_dua_norm, S_norm);
+    }
+    psd_dua_res *= solver->cache->rho_psd;
+    
+    // Predict new rho_psd using same formula as base rho
+    tinytype new_rho = predict_rho(adapter, psd_pri_res, psd_dua_res, psd_pri_norm, psd_dua_norm, solver->cache->rho_psd);
+    
+    // Simple update: just change rho_psd, no cache matrix updates
+    solver->cache->rho_psd = new_rho;
+    
+    // Store results
+    result->time_us = micros() - start_time;
+    result->initial_rho = initial_rho;
+    result->final_rho = new_rho;
+    result->pri_res = psd_pri_res;
+    result->dual_res = psd_dua_res;
+    result->pri_norm = psd_pri_norm;
+    result->dual_norm = psd_dua_norm;
 }

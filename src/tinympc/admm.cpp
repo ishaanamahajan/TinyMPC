@@ -2,7 +2,6 @@
 
 #include <Eigen/Dense>
 #include "admm.hpp"
-#include "rho_benchmark.hpp"    
 #include "psd_support.hpp"
 #include <cmath>
 
@@ -84,7 +83,7 @@ static inline tinyVector project_halfspace_leq(const tinyVector& z,
 
 // ---------- PSD utilities (svec/smat live in psd_support.hpp) ----------
 
-static inline void assemble_psd_block(TinySolver* solver, int k, tinyMatrix& M, bool last)
+void assemble_psd_block(TinySolver* solver, int k, tinyMatrix& M, bool last)
 {
     const int nx0 = solver->settings->nx0_psd;
     const int nu0 = solver->settings->nu0_psd;
@@ -151,35 +150,68 @@ void update_psd_slack(TinySolver *solver)
         tinyMatrix Hk(psd_dim, psd_dim);
         smat_inplace(solver->work->Hpsd.col(k), psd_dim, Hk);
 
-        // Guard against non-finite input to the eigen solver
+        // Guard against non-finite input - keep previous S
         if (!M.allFinite() || !Hk.allFinite()) {
-            solver->work->Spsd_new.col(k).setZero();
-            std::cout << "[PSD] k=" << k << " non-finite M/H, skipping projection" << "\n";
+            std::cout << "[PSD] k=" << k << " non-finite M/H, keeping previous S" << "\n";
             continue;
         }
 
+        // Build Raw and enforce exact symmetry
         tinyMatrix Raw = M + Hk;
         if (!Raw.allFinite()) {
-            solver->work->Spsd_new.col(k).setZero();
-            std::cout << "[PSD] k=" << k << " Raw non-finite, skipping projection" << "\n";
+            std::cout << "[PSD] k=" << k << " Raw non-finite, keeping previous S" << "\n";
             continue;
         }
+        Raw = tinytype(0.5) * (Raw + Raw.transpose());
 
         // Scale Raw to keep eigensolver in a safe numeric range
-        const tinytype RAW_CLIP = 1e6; // target magnitude cap
+        const tinytype RAW_CLIP = 1e6;
         tinytype max_abs = Raw.cwiseAbs().maxCoeff();
         tinytype scale = tinytype(1.0);
         if (std::isfinite(max_abs) && max_abs > RAW_CLIP) {
-            scale = max_abs / RAW_CLIP; // so max(|Raw/scale|) ~= RAW_CLIP
+            scale = max_abs / RAW_CLIP;
         }
 
-        // PSD projection (with prints)
-        Eigen::SelfAdjointEigenSolver<tinyMatrix> es(Raw / scale);
+        // Add STRONGER jitter on diagonal to make eigensolver robust
+        tinytype max_abs_safe = std::isfinite(max_abs) ? max_abs : tinytype(1.0);
+        tinytype jitter = std::max(tinytype(1e-10), tinytype(1e-9) * max_abs_safe);  // STRONGER
+        tinyMatrix Raw_safe = Raw / scale + jitter * tinyMatrix::Identity(psd_dim, psd_dim);
+
+        // Eigensolver with error checking
+        Eigen::SelfAdjointEigenSolver<tinyMatrix> es;
+        es.compute(Raw_safe, Eigen::ComputeEigenvectors);
+        
+        // Check if eigensolver succeeded
+        if (es.info() != Eigen::Success) {
+            std::cout << "[PSD] k=" << k << " eigensolve FAILED; keeping previous S, reducing rho_psd" << "\n";
+            // Calm down by reducing rho_psd
+            if (solver->cache->rho_psd > 0.1) {
+                solver->cache->rho_psd *= 0.5;
+                std::cout << "  -> rho_psd reduced to " << solver->cache->rho_psd << "\n";
+            }
+            continue;
+        }
+
+        // Check if eigenvalues/vectors are finite
         tinyVector lam = es.eigenvalues();
+        if (!lam.allFinite() || !es.eigenvectors().allFinite()) {
+            std::cout << "[PSD] k=" << k << " eigen results non-finite; keeping previous S" << "\n";
+            continue;
+        }
+
+        // EPSILON FLOOR on eigenvalues to avoid rank-deficient outputs
+        const tinytype eps_floor = tinytype(1e-12);
         tinytype minlam_raw = lam.minCoeff() * (1.0/scale);
-        lam = lam.cwiseMax(0);
+        lam = lam.cwiseMax(eps_floor);  // Floor at eps, not 0!
+        
         tinyMatrix Mproj = es.eigenvectors() * lam.asDiagonal() * es.eigenvectors().transpose();
-        Mproj *= scale; // unscale
+        Mproj *= scale;
+
+        // Final sanity check
+        if (!Mproj.allFinite()) {
+            std::cout << "[PSD] k=" << k << " Mproj non-finite; keeping previous S" << "\n";
+            continue;
+        }
 
         tinyVector col(svec_size(psd_dim));
         svec_inplace(Mproj, col);
@@ -541,7 +573,6 @@ bool termination_condition(TinySolver *solver)
     return false;
 }
 
-
 int solve(TinySolver *solver)
 {
     // Initialize variables
@@ -550,15 +581,7 @@ int solve(TinySolver *solver)
     solver->work->status = 11; // TINY_UNSOLVED
     solver->work->iter = 0;
 
-    // Setup for adaptive rho
-    RhoAdapter adapter;
-    adapter.rho_min = solver->settings->adaptive_rho_min;
-    adapter.rho_max = solver->settings->adaptive_rho_max;
-    adapter.clip = solver->settings->adaptive_rho_enable_clipping;
-    
-    RhoBenchmarkResult rho_result;
-
-    // Store previous values for residuals
+    // Store previous values for residuals (used for dual residual and adaptive rho)
     tinyMatrix v_prev = solver->work->vnew;
     tinyMatrix z_prev = solver->work->znew;
     
@@ -623,32 +646,38 @@ int solve(TinySolver *solver)
 
         solver->work->iter += 1;
 
-        // Handle adaptive rho if enabled
-        if (solver->settings->adaptive_rho) {
-            // Calculate residuals for adaptive rho
-            tinytype pri_res_input = (solver->work->u - solver->work->znew).cwiseAbs().maxCoeff();
-            tinytype pri_res_state = (solver->work->x - solver->work->vnew).cwiseAbs().maxCoeff();
-            tinytype dua_res_input = solver->cache->rho * (solver->work->znew - z_prev).cwiseAbs().maxCoeff();
-            tinytype dua_res_state = solver->cache->rho * (solver->work->vnew - v_prev).cwiseAbs().maxCoeff();
-
-            // Update rho every 5 iterations
-            if (i > 0 && i % 5 == 0) {
-                benchmark_rho_adaptation(
-                    &adapter,
-                    solver->work->x,
-                    solver->work->u,
-                    solver->work->vnew,
-                    solver->work->znew,
-                    solver->work->g,
-                    solver->work->y,
-                    solver->cache,
-                    solver->work,
-                    solver->work->N,
-                    &rho_result
-                );
+        // Handle adaptive rho if enabled - OSQP-style using native TinyMPC residuals
+        if (solver->settings->adaptive_rho && i > 0 && i % 25 == 0) {
+            // Use TinyMPC's native residuals (already computed for termination)
+            tinytype pri_res = std::max(
+                (solver->work->x - solver->work->vnew).cwiseAbs().maxCoeff(),
+                (solver->work->u - solver->work->znew).cwiseAbs().maxCoeff()
+            );
+            tinytype dua_res = std::max(
+                solver->cache->rho * (solver->work->vnew - v_prev).cwiseAbs().maxCoeff(),
+                solver->cache->rho * (solver->work->znew - z_prev).cwiseAbs().maxCoeff()
+            );
+            
+            // OSQP formula: rho_new = rho * sqrt(pri_res / dual_res)
+            const tinytype eps = 1e-10;
+            if (pri_res > eps && dua_res > eps) {
+                tinytype old_rho = solver->cache->rho;
+                tinytype ratio = pri_res / dua_res;
+                tinytype new_rho = old_rho * std::sqrt(ratio);
                 
-                // Update matrices using Taylor expansion
-                update_matrices_with_derivatives(solver->cache, rho_result.final_rho);
+                // Clamp to reasonable bounds
+                new_rho = std::min(std::max(new_rho, solver->settings->adaptive_rho_min), 
+                                  solver->settings->adaptive_rho_max);
+                
+                // Only update if change is significant (avoid tiny oscillations)
+                if (std::abs(new_rho - old_rho) / old_rho > 0.1) {
+                    solver->cache->rho = new_rho;
+                    if (i % 50 == 0) {
+                        std::cout << "[ADAPT-RHO] iter=" << i 
+                                  << " rho: " << old_rho << " -> " << new_rho
+                                  << " pri=" << pri_res << " dua=" << dua_res << "\n";
+                    }
+                }
             }
         }
             

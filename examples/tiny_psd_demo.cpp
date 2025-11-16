@@ -4,10 +4,12 @@
 #include <Eigen/Dense>
 #include <tinympc/tiny_api.hpp>
 #include "../src/tinympc/psd_support.hpp"
+#include "demo_config.hpp"
 
-#define NX0 4
-#define NU0 2
-#define N   31
+// Bind config macros to local constants for readability
+static constexpr int NX0 = DEMO_NX0;
+static constexpr int NU0 = DEMO_NU0;
+static constexpr int N   = DEMO_N;
 
 extern "C" int main() {
     using Mat = Eigen::Matrix<tinytype, Eigen::Dynamic, Eigen::Dynamic>;
@@ -40,11 +42,21 @@ extern "C" int main() {
     R.diagonal().segment(NU0 + nxu + nux, nuu).array() = tinytype(500.0); // vec(UU)
     Vec fdyn = Vec::Zero(nxL);
 
+    // ADMM penalties for default single-disk demo
+    const tinytype rho = 5.0;
+    const tinytype rho_psd = 1.0;
+    
     TinySolver *solver = nullptr;
     int status = tiny_setup(&solver,
                             A, B, fdyn, Q, R,
-                            /*rho*/ tinytype(12.0), nxL, nuL, N,
+                            rho, nxL, nuL, N,
                             /*verbose=*/1); // prints A,B,Q,R, Kinf, Pinf
+    
+    // Adaptive rho DISABLED - it doesn't converge well for PSD problems
+    // Use fixed rho instead
+    solver->settings->adaptive_rho = 0;
+    std::cout << "[PSD] Using fixed rho=" << solver->cache->rho << "\n";
+    
     if (status) return status;
 
     // Bounds: cap base states/controls; add generous caps on lifted blocks to avoid numeric blow-up
@@ -68,8 +80,7 @@ extern "C" int main() {
     // Enable PSD coupling with a small rho_psd initially (0.5–1.0)
     const bool ENABLE_PSD = true;
     if (ENABLE_PSD) {
-        // Start modest with rho_psd = 1.2; can ramp to 5 later if calm
-        tiny_enable_psd(solver, NX0, NU0, /*rho_psd*/ tinytype(1.1));
+        tiny_enable_psd(solver, NX0, NU0, rho_psd);
     }
 
     // Lifted initial condition: [x0; vec(x0*x0')]
@@ -121,18 +132,19 @@ extern "C" int main() {
     }
 
     // Pure-PSD variant: lifted disks (no TV tangents)
-    const tinytype ox = -5.0, oy = 0.0, r = 2.0;
+    const tinytype ox = tinytype(DEMO_OBS_X), oy = tinytype(DEMO_OBS_Y), r = tinytype(DEMO_OBS_R);
     std::vector<std::array<tinytype,3>> disks = {{ {ox, oy, r} }}; // one circle
     tiny_set_lifted_disks(solver, disks);
 
     // Solve once—watch the PSD eigen prints
     tiny_solve(solver);
+    int iters = solver->solution->iter;
     
     // Export solution to CSV for plotting
     std::ofstream csv_file("../psd_trajectory.csv");
     if (csv_file.is_open()) {
         // Header
-        csv_file << "k,x1,x2,x3,x4,u1,u2,XX_11,XX_22,rank1_gap\n";
+        csv_file << "k,x1,x2,x3,x4,u1,u2,XX_11,XX_22,rank1_gap,signed_dist,iter\n";
         
         for (int k = 0; k < N; ++k) {
             // Extract solution (from solution->x which has final projected values)
@@ -164,10 +176,13 @@ extern "C" int main() {
                 csv_file << ",0,0";  // No control at terminal stage
             }
             
-            csv_file << "," << XX_11 << "," << XX_22 << "," << gap << "\n";
+            // Signed distance to obstacle used in demo
+            double sd = std::sqrt((x1-ox)*(x1-ox) + (x2-oy)*(x2-oy)) - r;
+
+            csv_file << "," << XX_11 << "," << XX_22 << "," << gap << "," << sd << "," << iters << "\n";
         }
         csv_file.close();
-        std::cout << "\n[EXPORT] Trajectory saved to ../psd_trajectory.csv\n";
+        std::cout << "\n[EXPORT] Trajectory saved to psd_trajectory.csv\n";
     }
     
     return 0;

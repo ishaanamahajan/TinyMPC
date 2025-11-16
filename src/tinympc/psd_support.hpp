@@ -129,22 +129,54 @@ inline void tiny_update_base_tangent_avoidance_tv(
     const int nxL = solver->work->nx;
     const int nc  = std::max(1, solver->work->numtvStateLinear);
 
+    // Track min distance for debugging
+    tinytype min_dist = 1e9;
+    int min_dist_k = 0;
+
     for (int k = 0; k < N; ++k) {
         tinytype x = solver->work->x(0,k);
         tinytype y = solver->work->x(1,k);
+        
+        // Safety check for NaN/Inf values in trajectory
+        if (!std::isfinite(x) || !std::isfinite(y)) {
+            std::cout << "[TV-UPDATE] WARNING: k=" << k << " non-finite x=" << x << " y=" << y 
+                      << " - using previous constraint\n";
+            continue; // Keep previous constraint
+        }
+        
         tinytype dx = x - ox;
         tinytype dy = y - oy;
         tinytype d  = std::sqrt(dx*dx + dy*dy);
+        
+        if (d < min_dist) {
+            min_dist = d;
+            min_dist_k = k;
+        }
 
-        // Normal n = (dx,dy)/||dx,dy||. Use a safe default when near zero.
+        // Safety: if too close to center, use a default separating plane
+        const tinytype safety_eps = tinytype(1e-6);
         tinytype nx = 1.0, ny = 0.0;
-        if (d > tinytype(1e-8)) { nx = dx / d; ny = dy / d; }
+        if (d > safety_eps) { 
+            nx = dx / d; 
+            ny = dy / d; 
+        } else {
+            // Use direction from previous stage or default
+            std::cout << "[TV-UPDATE] WARNING: k=" << k << " very close to center d=" << d 
+                      << " - using default normal\n";
+        }
 
         // Half-space: n^T [x;y] >= n^T [ox;oy] + r + margin
         // Convert to a^T z <= b with a = -[n_x, n_y, 0,...], b = -(n^T o + r + margin)
         tinyVector a = tinyVector::Zero(nxL);
         a(0) = -nx; a(1) = -ny;
         tinytype b = - (nx*ox + ny*oy + r + margin);
+
+        // Safety check on constraint coefficients
+        if (!std::isfinite(b) || a.squaredNorm() < safety_eps) {
+            std::cout << "[TV-UPDATE] WARNING: k=" << k << " invalid constraint ||a||=" 
+                      << a.norm() << " b=" << b << " - skipping\n";
+            continue;
+        }
 
         const int row = k*nc + 0;
         if (row >= 0 && row < solver->work->tv_Alin_x.rows()) {
@@ -153,6 +185,13 @@ inline void tiny_update_base_tangent_avoidance_tv(
         if (solver->work->tv_blin_x.rows() >= 1 && k < solver->work->tv_blin_x.cols()) {
             solver->work->tv_blin_x(0,k) = b;
         }
+    }
+    
+    // Print distance summary every update (sampled to reduce spam)
+    tinytype signed_dist = min_dist - r;
+    if (solver->work->iter % 10 == 0) {
+        std::cout << "[TV-UPDATE] iter=" << solver->work->iter 
+                  << " min_signed_dist=" << signed_dist << " at k=" << min_dist_k << "\n";
     }
 }
 
@@ -232,6 +271,57 @@ inline int tiny_set_lifted_disks(
         tinyVector::Zero(0));
 }
 
+// Pure-PSD variant in 3D: add lifted sphere constraints (no TV relinearization)
+// For each sphere with center o=(ox,oy,oz) and radius r, the constraint is:
+//   (x-o)^T(x-o) >= r^2  =>  x^T x - 2 o^T x >= r^2 - o^T o
+// In lifted form, using entries for XX_11, XX_22, XX_33 and base x[0:3):
+//   m^T [x; vec(XX)] >= n where m has -2*o in base positions and 1's on XX_11,XX_22,XX_33
+// We store a^T z <= b via a = -m, b = -n into Alin_x, blin_x.
+inline int tiny_set_lifted_spheres(
+    TinySolver* solver,
+    const std::vector<std::array<tinytype,4>>& spheres)
+{
+    if (!solver) { std::cout << "tiny_set_lifted_spheres: solver nullptr\n"; return 1; }
+    const int nx0 = solver->settings->nx0_psd;
+    const int nxL = solver->work->nx;
+    if (nx0 < 3) { std::cout << "tiny_set_lifted_spheres: nx0_psd must be >= 3\n"; return 1; }
+    const int m = static_cast<int>(spheres.size());
+    if (m == 0) return 0;
+
+    tinyMatrix Alin_x = tinyMatrix::Zero(m, nxL);
+    tinyVector blin_x = tinyVector::Zero(m);
+
+    const int idx_xx11 = nx0 + 0 + 0*nx0;
+    const int idx_xx22 = nx0 + 1 + 1*nx0;
+    const int idx_xx33 = nx0 + 2 + 2*nx0;
+
+    for (int j = 0; j < m; ++j) {
+        const tinytype ox = spheres[j][0];
+        const tinytype oy = spheres[j][1];
+        const tinytype oz = spheres[j][2];
+        const tinytype r  = spheres[j][3];
+
+        tinyVector mrow = tinyVector::Zero(nxL);
+        mrow(0) = -2 * ox; mrow(1) = -2 * oy; mrow(2) = -2 * oz;
+        mrow(idx_xx11) = 1; mrow(idx_xx22) = 1; mrow(idx_xx33) = 1;
+        tinytype n = (r*r - (ox*ox + oy*oy + oz*oz));
+
+        tinyVector a = -mrow;
+        tinytype   b = -n;
+        Alin_x.row(j) = a.transpose();
+        blin_x(j) = b;
+    }
+
+    // Enable and set in solver
+    tiny_enable_state_linear(solver, m);
+    return tiny_set_linear_constraints(
+        solver,
+        Alin_x,
+        blin_x,
+        tinyMatrix::Zero(0, solver->work->nu),
+        tinyVector::Zero(0));
+}
+
 inline void tiny_set_circle_avoidance(TinySolver* solver, tinytype ox, tinytype oy, tinytype r) {
     const int nx0 = solver->settings->nx0_psd; // base state dim
     const int nxL = solver->work->nx;          // lifted state dim
@@ -266,4 +356,76 @@ inline void tiny_set_xmin_halfspace(TinySolver* solver, tinytype xmin) {
         solver->work->tv_Alin_x.row(k * stride + 1) = a.transpose();
         solver->work->tv_blin_x(1, k) = b;
     }
+}
+
+// ---------------- Ellipse constraint support ----------------
+
+// Ellipse definition: (x-o)^T E (x-o) >= rho^2, where E is a 2x2 SPD matrix
+struct Ellipse {
+    Eigen::Matrix2d E;   // Shape matrix (SPD)
+    Eigen::Vector2d o;   // Center
+    double rho;          // Threshold
+};
+
+// Build lifted row for ellipse constraint: m^T * \bar{x}_k >= n
+// where \bar{x}_k = [x; vec(XX)]
+// Derivation: (x-o)^T E (x-o) = x^T E x - 2 o^T E x + o^T E o >= rho^2
+//             = tr(E * XX) - 2(E*o)^T x + (o^T E o - rho^2) >= 0
+// In lifted form: [vec(E)^T for XX block, -2(E*o)^T for x block] \bar{x} >= rho^2 - o^T E o
+inline void lifted_row_for_ellipse(const Ellipse& el, int NX0, int nxL,
+                                   Eigen::VectorXd& m, double& n) {
+    m.setZero(nxL);
+    
+    // Base state terms: -2 * E * o
+    Eigen::Vector2d c = -2.0 * el.E * el.o;
+    m(0) = c.x();
+    m(1) = c.y();
+    
+    // vec(XX) block: fill only position components (2x2 upper-left of XX)
+    // XX is stored column-major: XX_00, XX_10, XX_01, XX_11 at indices NX0+0, NX0+1, NX0+NX0, NX0+NX0+1
+    auto put = [&](int i, int j, double v) {
+        m(NX0 + j*NX0 + i) += v;
+    };
+    put(0, 0, el.E(0,0));
+    put(0, 1, el.E(0,1));
+    put(1, 0, el.E(1,0));
+    put(1, 1, el.E(1,1));
+    
+    n = el.rho * el.rho - el.o.transpose() * el.E * el.o;
+}
+
+// Set lifted ellipse constraints (analogous to tiny_set_lifted_disks)
+// Each ellipse contributes one linear inequality in lifted space
+inline int tiny_set_lifted_ellipses(
+    TinySolver* solver,
+    const std::vector<Ellipse>& ellipses)
+{
+    if (!solver) { std::cout << "tiny_set_lifted_ellipses: solver nullptr\n"; return 1; }
+    const int nx0 = solver->settings->nx0_psd;
+    const int nxL = solver->work->nx;
+    if (nx0 <= 0) { std::cout << "tiny_set_lifted_ellipses: nx0_psd not set (>0)\n"; return 1; }
+    const int m = static_cast<int>(ellipses.size());
+    if (m == 0) return 0;
+
+    tinyMatrix Alin_x = tinyMatrix::Zero(m, nxL);
+    tinyVector blin_x = tinyVector::Zero(m);
+
+    for (int j = 0; j < m; ++j) {
+        Eigen::VectorXd mrow;
+        double n;
+        lifted_row_for_ellipse(ellipses[j], nx0, nxL, mrow, n);
+        
+        // Convert to a^T z <= b form: a = -m, b = -n
+        Alin_x.row(j) = (-mrow).transpose().cast<tinytype>();
+        blin_x(j) = tinytype(-n);
+    }
+
+    // Enable and set in solver
+    tiny_enable_state_linear(solver, m);
+    return tiny_set_linear_constraints(
+        solver,
+        Alin_x,
+        blin_x,
+        tinyMatrix::Zero(0, solver->work->nu),
+        tinyVector::Zero(0));
 }

@@ -79,7 +79,7 @@ tinytype predict_rho(
 void update_matrices_with_derivatives(TinyCache* cache, tinytype new_rho);
 
 
-// Main benchmark function
+// Main benchmark function for base rho
 void benchmark_rho_adaptation(
     RhoAdapter* adapter,
     const tinyMatrix& x_prev,
@@ -91,5 +91,13 @@ void benchmark_rho_adaptation(
     TinyCache* cache,
     TinyWorkspace* work,
     int N,
+    RhoBenchmarkResult* result
+);
+
+// Benchmark function for PSD rho (same architecture as base rho)
+void benchmark_rho_psd_adaptation(
+    RhoAdapter* adapter,
+    TinySolver* solver,
+    const tinyMatrix& Spsd_prev,
     RhoBenchmarkResult* result
 );

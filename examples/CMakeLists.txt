@@ -24,6 +24,10 @@ target_link_libraries(rocket_landing_mpc LINK_PUBLIC tinympcstatic)
 add_executable(tiny_psd_demo tiny_psd_demo.cpp)
 target_link_libraries(tiny_psd_demo LINK_PUBLIC tinympcstatic)
 
+# TV-linear only demo (no PSD)
+add_executable(tiny_tv_linear_demo tiny_tv_linear_demo.cpp)
+target_link_libraries(tiny_tv_linear_demo LINK_PUBLIC tinympcstatic)
+
 # Codegen examples
 add_executable(codegen_random codegen_random.cpp)
 target_link_libraries(codegen_random LINK_PUBLIC tinympcstatic)
