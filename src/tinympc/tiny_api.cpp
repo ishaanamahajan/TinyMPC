@@ -449,6 +449,8 @@ int tiny_set_default_settings(TinySettings* settings) {
     settings->obs_r = 0.0;
     settings->obs_margin = 0.0;
 
+    
+
     return 0;
 }
 

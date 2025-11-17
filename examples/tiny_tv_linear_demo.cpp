@@ -2,6 +2,7 @@
 #include <fstream>
 #include <limits>
 #include <Eigen/Dense>
+#include <vector>
 #include <tinympc/tiny_api.hpp>
 #include "../src/tinympc/psd_support.hpp"
 #include "demo_config.hpp"
@@ -40,7 +41,13 @@ extern "C" int main() {
 
     // ADMM penalty for default TV-linear demo
     const tinytype rho = 5.0;
-    const tinytype margin = tinytype(DEMO_OBS_MARGIN); // keep consistent with PSD demo radius
+
+    // Use the same effective obstacle radius as the PSD demo:
+    //   r_eff = DEMO_OBS_R + DEMO_OBS_MARGIN
+    const tinytype obs_r      = tinytype(DEMO_OBS_R);
+    const tinytype obs_margin = tinytype(DEMO_OBS_MARGIN);
+    const tinytype r_eff      = obs_r + obs_margin;
+    const tinytype margin     = tinytype(0.0); // geometry radius already includes DEMO_OBS_MARGIN
     
     TinySolver *solver = nullptr;
     int status = tiny_setup(&solver,
@@ -105,20 +112,31 @@ extern "C" int main() {
     tiny_set_u_ref(solver, Uref);
 
     // Per-iteration re-tangent hyperplane projection (no trust region, no outer loop)
-    // Enable base-tangent updates so planes are refreshed every ADMM iteration
-    const tinytype ox = tinytype(DEMO_OBS_X), oy = tinytype(DEMO_OBS_Y), r = tinytype(DEMO_OBS_R);
+    // Enable base-tangent updates so planes are refreshed every ADMM iteration.
+    // We pass the effective radius r_eff so the tangent geometry matches the PSD projector.
+    const tinytype ox = tinytype(DEMO_OBS_X), oy = tinytype(DEMO_OBS_Y), r = r_eff;
     tiny_enable_base_tangent_avoidance(solver, ox, oy, r, margin);
 
     // Solve
     tiny_solve(solver);
     int iters = solver->solution->iter;
 
+    // Build a dynamics-consistent rollout under the solved base controls
+    Vec x_dyn = x0;  // base initial state [x,y,vx,vy]
+    std::vector<Vec> Xdyn(N);
+    Xdyn[0] = x_dyn;
+    for (int k = 0; k < N-1; ++k) {
+        Vec u_base = solver->solution->u.col(k).topRows(NU0);
+        x_dyn = Ad * x_dyn + Bd * u_base; // + fdyn.topRows(NX0) if nonzero
+        Xdyn[k+1] = x_dyn;
+    }
+
     // Export trajectory and signed distance to obstacle
     std::ofstream csv("../tv_linear_trajectory.csv");
     if (csv.is_open()) {
         csv << "k,x1,x2,u1,u2,signed_dist,iter\n";
         for (int k = 0; k < N; ++k) {
-            Vec xk = solver->solution->x.col(k);
+            Vec xk = Xdyn[k];
             double x1 = xk(0), x2 = xk(1);
             double sd = std::sqrt((x1-ox)*(x1-ox) + (x2-oy)*(x2-oy)) - r;
             csv << k << "," << x1 << "," << x2;

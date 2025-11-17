@@ -271,7 +271,7 @@ void update_psd_dual(TinySolver *solver)
 */
 void update_slack(TinySolver *solver)
 {
-
+    
     // Update bound constraint slack variables for state
     solver->work->vnew = solver->work->x + solver->work->g;
     
@@ -456,7 +456,7 @@ void update_dual(TinySolver *solver)
     // Update time-varying linear constraint dual variables for input
     if (solver->settings->en_tv_input_linear) {
         solver->work->yl_tv = solver->work->yl_tv + solver->work->u - solver->work->zlnew_tv;
-    }
+}
 }
 
 /**
@@ -557,10 +557,53 @@ bool termination_condition(TinySolver *solver)
 {
     if (solver->work->iter % solver->settings->check_termination == 0)
     {
-        solver->work->primal_residual_state = (solver->work->x - solver->work->vnew).cwiseAbs().maxCoeff();
-        solver->work->dual_residual_state = ((solver->work->v - solver->work->vnew).cwiseAbs().maxCoeff()) * solver->cache->rho;
-        solver->work->primal_residual_input = (solver->work->u - solver->work->znew).cwiseAbs().maxCoeff();
-        solver->work->dual_residual_input = ((solver->work->z - solver->work->znew).cwiseAbs().maxCoeff()) * solver->cache->rho;
+        // Primal residuals include box slacks and (if enabled) linear and TV-linear slacks
+        tinytype pri_state = (solver->work->x - solver->work->vnew).cwiseAbs().maxCoeff();
+        tinytype pri_input = (solver->work->u - solver->work->znew).cwiseAbs().maxCoeff();
+
+        if (solver->settings->en_state_linear) {
+            tinytype r = (solver->work->x - solver->work->vlnew).cwiseAbs().maxCoeff();
+            if (r > pri_state) pri_state = r;
+        }
+        if (solver->settings->en_input_linear) {
+            tinytype r = (solver->work->u - solver->work->zlnew).cwiseAbs().maxCoeff();
+            if (r > pri_input) pri_input = r;
+        }
+        if (solver->settings->en_tv_state_linear) {
+            tinytype r = (solver->work->x - solver->work->vlnew_tv).cwiseAbs().maxCoeff();
+            if (r > pri_state) pri_state = r;
+        }
+        if (solver->settings->en_tv_input_linear) {
+            tinytype r = (solver->work->u - solver->work->zlnew_tv).cwiseAbs().maxCoeff();
+            if (r > pri_input) pri_input = r;
+        }
+
+        solver->work->primal_residual_state = pri_state;
+        solver->work->primal_residual_input = pri_input;
+
+        // Dual residuals use change in slack variables scaled by rho
+        tinytype dua_state = (solver->work->v - solver->work->vnew).cwiseAbs().maxCoeff() * solver->cache->rho;
+        tinytype dua_input = (solver->work->z - solver->work->znew).cwiseAbs().maxCoeff() * solver->cache->rho;
+
+        if (solver->settings->en_state_linear) {
+            tinytype r = (solver->work->vl - solver->work->vlnew).cwiseAbs().maxCoeff() * solver->cache->rho;
+            if (r > dua_state) dua_state = r;
+        }
+        if (solver->settings->en_input_linear) {
+            tinytype r = (solver->work->zl - solver->work->zlnew).cwiseAbs().maxCoeff() * solver->cache->rho;
+            if (r > dua_input) dua_input = r;
+        }
+        if (solver->settings->en_tv_state_linear) {
+            tinytype r = (solver->work->vl_tv - solver->work->vlnew_tv).cwiseAbs().maxCoeff() * solver->cache->rho;
+            if (r > dua_state) dua_state = r;
+        }
+        if (solver->settings->en_tv_input_linear) {
+            tinytype r = (solver->work->zl_tv - solver->work->zlnew_tv).cwiseAbs().maxCoeff() * solver->cache->rho;
+            if (r > dua_input) dua_input = r;
+        }
+
+        solver->work->dual_residual_state = dua_state;
+        solver->work->dual_residual_input = dua_input;
 
         if (solver->work->primal_residual_state < solver->settings->abs_pri_tol &&
             solver->work->primal_residual_input < solver->settings->abs_pri_tol &&
@@ -622,14 +665,19 @@ int solve(TinySolver *solver)
 
         forward_pass(solver);
 
-        // Update per-stage base tangent half-spaces using the latest rollout
+        // Update per-stage base tangent half-spaces using the latest rollout.
+        // If multiple TV state-linear rows are allocated, update all disks; otherwise single.
         if (solver->settings->en_tv_state_linear && solver->settings->en_base_tangent_tv) {
-            tiny_update_base_tangent_avoidance_tv(
-                solver,
-                solver->settings->obs_x,
-                solver->settings->obs_y,
-                solver->settings->obs_r,
-                solver->settings->obs_margin);
+            if (solver->work->numtvStateLinear > 1) {
+                tiny_update_base_tangent_avoidance_tv_multi_global(solver);
+            } else {
+                tiny_update_base_tangent_avoidance_tv(
+                    solver,
+                    solver->settings->obs_x,
+                    solver->settings->obs_y,
+                    solver->settings->obs_r,
+                    solver->settings->obs_margin);
+            }
         }
 
         // Project slack variables into feasible domain
@@ -680,6 +728,8 @@ int solve(TinySolver *solver)
                 }
             }
         }
+
+        
             
         // Store previous values for next iteration
         z_prev = solver->work->znew;
@@ -700,9 +750,13 @@ int solve(TinySolver *solver)
             return 0;
         }
 
-        // Save previous slack variables
+        // Save previous slack variables for residual computation in next iter
         solver->work->v = solver->work->vnew;
         solver->work->z = solver->work->znew;
+        if (solver->settings->en_state_linear)  solver->work->vl   = solver->work->vlnew;
+        if (solver->settings->en_input_linear)  solver->work->zl   = solver->work->zlnew;
+        if (solver->settings->en_tv_state_linear)  solver->work->vl_tv = solver->work->vlnew_tv;
+        if (solver->settings->en_tv_input_linear)  solver->work->zl_tv = solver->work->zlnew_tv;
       
     }
     

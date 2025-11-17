@@ -195,6 +195,81 @@ inline void tiny_update_base_tangent_avoidance_tv(
     }
 }
 
+// Global stores for multi-disk TV update (demo convenience to avoid API churn)
+inline std::vector<std::array<tinytype,3>>& tv_disks_store() {
+    static std::vector<std::array<tinytype,3>> disks;
+    return disks;
+}
+inline tinytype& tv_disks_margin_store() {
+    static tinytype margin = tinytype(0);
+    return margin;
+}
+
+// Multi-disk version: update per-stage tangent half-spaces for all provided disks
+// Uses the same indexing layout as update_slack(): rows are grouped per stage.
+inline void tiny_update_base_tangent_avoidance_tv_multi(
+    TinySolver* solver,
+    const std::vector<std::array<tinytype,3>>& disks,
+    tinytype margin)
+{
+    if (!solver) return;
+    const int N   = solver->work->N;
+    const int nxL = solver->work->nx;
+    const int nc  = std::max(1, solver->work->numtvStateLinear);
+    const int m   = static_cast<int>(disks.size());
+    if (m <= 0) return;
+    // We expect nc == m; if not, we only fill the first min(nc, m) rows per stage
+    const int rows_per_stage = std::min(nc, m);
+
+    for (int k = 0; k < N; ++k) {
+        tinytype x = solver->work->x(0,k);
+        tinytype y = solver->work->x(1,k);
+
+        // Sanitize current state
+        if (!std::isfinite(x) || !std::isfinite(y)) {
+            // Keep previous constraints if trajectory is non-finite
+            continue;
+        }
+
+        for (int j = 0; j < rows_per_stage; ++j) {
+            const tinytype ox = disks[j][0];
+            const tinytype oy = disks[j][1];
+            const tinytype r  = disks[j][2];
+
+            tinytype dx = x - ox;
+            tinytype dy = y - oy;
+            tinytype d  = std::sqrt(dx*dx + dy*dy);
+            const tinytype safety_eps = tinytype(1e-6);
+            tinytype nx = 1.0, ny = 0.0;
+            if (d > safety_eps) { nx = dx / d; ny = dy / d; }
+
+            // Half-space n^T [x;y] >= n^T o + r + margin
+            tinyVector a = tinyVector::Zero(nxL);
+            a(0) = -nx; a(1) = -ny; // a^T z <= b form
+            tinytype b = - (nx*ox + ny*oy + r + margin);
+
+            if (!std::isfinite(b) || !a.allFinite() || a.squaredNorm() < safety_eps) {
+                continue;
+            }
+
+            const int row = k*nc + j;
+            if (row >= 0 && row < solver->work->tv_Alin_x.rows()) {
+                solver->work->tv_Alin_x.row(row) = a.transpose();
+            }
+            if (j < solver->work->tv_blin_x.rows() && k < solver->work->tv_blin_x.cols()) {
+                solver->work->tv_blin_x(j, k) = b;
+            }
+        }
+    }
+}
+
+// Convenience wrapper using global storage set by tiny_enable_base_tangent_avoidance_2d_multi
+inline void tiny_update_base_tangent_avoidance_tv_multi_global(TinySolver* solver) {
+    auto& disks = tv_disks_store();
+    if (disks.empty()) return;
+    tiny_update_base_tangent_avoidance_tv_multi(solver, disks, tv_disks_margin_store());
+}
+
 // Convenience: enable base-tangent avoidance from user code.
 inline int tiny_enable_base_tangent_avoidance(
     TinySolver* solver, tinytype ox, tinytype oy, tinytype r, tinytype margin)
@@ -207,6 +282,35 @@ inline int tiny_enable_base_tangent_avoidance(
     solver->settings->obs_x = ox;
     solver->settings->obs_y = oy;
     solver->settings->obs_r = r;
+    solver->settings->obs_margin = margin;
+    return 0;
+}
+
+// Convenience helper for multiple 2D circular obstacles using the existing
+// base-tangent TV machinery. Allocates one per-stage row per disk and stores
+// the list for per-iteration updates in the ADMM loop.
+inline int tiny_enable_base_tangent_avoidance_2d_multi(
+    TinySolver* solver,
+    const std::vector<std::array<tinytype,3>>& disks,
+    tinytype margin)
+{
+    if (!solver) { std::cout << "tiny_enable_base_tangent_avoidance_2d_multi: solver nullptr\n"; return 1; }
+    const int m = static_cast<int>(disks.size());
+    if (m <= 0) return 0;
+
+    // Allocate m rows per stage
+    tiny_enable_tv_state_linear(solver, m);
+    solver->settings->en_tv_state_linear = 1;
+    solver->settings->en_base_tangent_tv = 1;
+
+    // Store for global multi-update use
+    tv_disks_store() = disks;
+    tv_disks_margin_store() = margin;
+
+    // Also set the first obstacle into settings for backward compatibility
+    solver->settings->obs_x = disks[0][0];
+    solver->settings->obs_y = disks[0][1];
+    solver->settings->obs_r = disks[0][2];
     solver->settings->obs_margin = margin;
     return 0;
 }
@@ -225,7 +329,9 @@ inline int tiny_enable_state_linear(TinySolver* solver, int n_constr) {
 }
 
 // Pure-PSD variant: add lifted disk constraints (no TV relinearization)
-// Each disk j with center (ox,oy) and radius r contributes a row
+// Each disk j with center (ox,oy) and effective radius r contributes a row.
+// In the demos, this "effective" radius is typically DEMO_OBS_R + DEMO_OBS_MARGIN
+// so that it matches the TV-linear tangent geometry.
 // m^T [x; vec(XX)] >= n  where m = [-2ox, -2oy, e11, e22] and n = r^2 - ||o||^2.
 // We store a^T z <= b via a = -m, b = -n into Alin_x, blin_x and enable en_state_linear.
 inline int tiny_set_lifted_disks(
@@ -272,7 +378,7 @@ inline int tiny_set_lifted_disks(
 }
 
 // Pure-PSD variant in 3D: add lifted sphere constraints (no TV relinearization)
-// For each sphere with center o=(ox,oy,oz) and radius r, the constraint is:
+// For each sphere with center o=(ox,oy,oz) and effective radius r, the constraint is:
 //   (x-o)^T(x-o) >= r^2  =>  x^T x - 2 o^T x >= r^2 - o^T o
 // In lifted form, using entries for XX_11, XX_22, XX_33 and base x[0:3):
 //   m^T [x; vec(XX)] >= n where m has -2*o in base positions and 1's on XX_11,XX_22,XX_33

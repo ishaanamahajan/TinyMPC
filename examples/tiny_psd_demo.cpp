@@ -2,6 +2,7 @@
 #include <fstream>
 #include <limits>
 #include <Eigen/Dense>
+#include <vector>
 #include <tinympc/tiny_api.hpp>
 #include "../src/tinympc/psd_support.hpp"
 #include "demo_config.hpp"
@@ -30,7 +31,7 @@ extern "C" int main() {
     // Base state: [x, y, vx, vy] (slightly stronger to avoid saturation)
     Q(0,0) = 10.0; Q(1,1) = 10.0; Q(2,2) = 1.0; Q(3,3) = 1.0;
     // Lifted vec(XX): tiny quadratic (q_xx ~ 1e-6) to avoid over‑tightening
-    Q.diagonal().segment(NX0, NX0*NX0).array() = tinytype(1e-6);
+    Q.diagonal().segment(NX0, NX0*NX0).array() = tinytype(1e-2);
 
     Mat R = Mat::Zero(nuL, nuL);
     const int nxu = NX0*NU0, nux = NU0*NX0, nuu = NU0*NU0;
@@ -73,8 +74,8 @@ extern "C" int main() {
     u_min.topRows(NU0).setConstant(-3.0);
     u_max.topRows(NU0).setConstant( 3.0);
     // Gentle caps on lifted inputs
-    u_min.bottomRows(nxu + nux + nuu).setConstant(-1000.0);
-    u_max.bottomRows(nxu + nux + nuu).setConstant( 1000.0);
+    u_min.bottomRows(nxu + nux + nuu).setConstant(-100.0);
+    u_max.bottomRows(nxu + nux + nuu).setConstant( 100.0);
     tiny_set_bound_constraints(solver, x_min, x_max, u_min, u_max);
 
     // Enable PSD coupling with a small rho_psd initially (0.5–1.0)
@@ -131,14 +132,31 @@ extern "C" int main() {
         tiny_set_u_ref(solver, Uref);
     }
 
-    // Pure-PSD variant: lifted disks (no TV tangents)
-    const tinytype ox = tinytype(DEMO_OBS_X), oy = tinytype(DEMO_OBS_Y), r = tinytype(DEMO_OBS_R);
-    std::vector<std::array<tinytype,3>> disks = {{ {ox, oy, r} }}; // one circle
+    // Pure-PSD variant: lifted disks (no TV tangents).
+    // Use the same effective obstacle radius as the TV-linear demo:
+    //   r_eff = DEMO_OBS_R + DEMO_OBS_MARGIN
+    const tinytype ox         = tinytype(DEMO_OBS_X);
+    const tinytype oy         = tinytype(DEMO_OBS_Y);
+    const tinytype obs_r      = tinytype(DEMO_OBS_R);
+    const tinytype obs_margin = tinytype(DEMO_OBS_MARGIN);
+    const tinytype r_eff      = obs_r + obs_margin;
+
+    std::vector<std::array<tinytype,3>> disks = {{ {ox, oy, r_eff} }}; // one circle
     tiny_set_lifted_disks(solver, disks);
 
     // Solve once—watch the PSD eigen prints
     tiny_solve(solver);
     int iters = solver->solution->iter;
+
+    // Build a dynamics-consistent base rollout under the solved base controls
+    Vec x_dyn = x0;  // base initial state [x,y,vx,vy]
+    std::vector<Vec> Xdyn(N);
+    Xdyn[0] = x_dyn;
+    for (int k = 0; k < N-1; ++k) {
+        Vec u_base = solver->solution->u.col(k).topRows(NU0);
+        x_dyn = Ad * x_dyn + Bd * u_base; // + fdyn.topRows(NX0) if nonzero
+        Xdyn[k+1] = x_dyn;
+    }
     
     // Export solution to CSV for plotting
     std::ofstream csv_file("../psd_trajectory.csv");
@@ -147,11 +165,12 @@ extern "C" int main() {
         csv_file << "k,x1,x2,x3,x4,u1,u2,XX_11,XX_22,rank1_gap,signed_dist,iter\n";
         
         for (int k = 0; k < N; ++k) {
-            // Extract solution (from solution->x which has final projected values)
-            Vec xk = solver->solution->x.col(k);
+            // Dynamics-consistent base state
+            Vec xk_dyn = Xdyn[k];
+            double x1 = xk_dyn(0), x2 = xk_dyn(1), x3 = xk_dyn(2), x4 = xk_dyn(3);
             
-            // Position and velocity (first 4 states)
-            double x1 = xk(0), x2 = xk(1), x3 = xk(2), x4 = xk(3);
+            // Slack-based lifted state for diagnostics (XX, rank-1 gap)
+            Vec xk = solver->solution->x.col(k);
             
             // XX matrix diagonal elements (for checking rank-1)
             Mat XX_vec(NX0, NX0);
@@ -176,8 +195,8 @@ extern "C" int main() {
                 csv_file << ",0,0";  // No control at terminal stage
             }
             
-            // Signed distance to obstacle used in demo
-            double sd = std::sqrt((x1-ox)*(x1-ox) + (x2-oy)*(x2-oy)) - r;
+            // Signed distance to obstacle used in demo (measured to the effective radius r_eff)
+            double sd = std::sqrt((x1-ox)*(x1-ox) + (x2-oy)*(x2-oy)) - r_eff;
 
             csv_file << "," << XX_11 << "," << XX_22 << "," << gap << "," << sd << "," << iters << "\n";
         }

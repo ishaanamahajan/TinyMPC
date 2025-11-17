@@ -34,6 +34,11 @@ def main():
     ap.add_argument("--psd", default="psd_trajectory.csv", help="PSD CSV path")
     ap.add_argument("--tv", default="tv_linear_trajectory.csv", help="TV-LIN CSV path")
     ap.add_argument("--out", default="psd_vs_tv_plots.png", help="Output figure path")
+    ap.add_argument("--narrow2d", action="store_true",
+                    help="Use narrow-2D demo CSVs (psd_narrow2d_trajectory.csv, tv_narrow2d_trajectory.csv)")
+    # Backward-compatible alias with underscore
+    ap.add_argument("--narrow_2d", action="store_true",
+                    help="Alias for --narrow2d")
     ap.add_argument("--ox", type=float, default=-5.0, help="Obstacle center x")
     ap.add_argument("--oy", type=float, default=0.0, help="Obstacle center y")
     ap.add_argument("--r", type=float, default=2.0, help="Obstacle radius")
@@ -42,6 +47,17 @@ def main():
     ap.add_argument("--gx", type=float, default=0.0, help="Goal x")
     ap.add_argument("--gy", type=float, default=0.0, help="Goal y")
     args = ap.parse_args()
+
+    # If requested, switch to the narrow-2D demo CSVs and geometry by default.
+    # Users can still override paths explicitly via flags.
+    if args.narrow2d or args.narrow_2d:
+        if args.psd == "psd_trajectory.csv":
+            args.psd = "psd_narrow2d_trajectory.csv"
+        if args.tv == "tv_linear_trajectory.csv":
+            args.tv = "tv_narrow2d_trajectory.csv"
+        # Update default start to match narrow-2D demos (goal stays at origin)
+        if args.x0y == 0.1:
+            args.x0y = 0.0
 
     df_psd = load_csv(args.psd)
     if df_psd is None and args.psd == "psd_trajectory.csv":
@@ -59,22 +75,41 @@ def main():
     fig, axes = plt.subplots(fig_rows, 1, figsize=(10, 12))
 
     # Common obstacle and endpoints
-    x_obs = np.array([args.ox, args.oy])
-    r_obs = args.r
+    if args.narrow2d:
+        # Two symmetric disks forming a narrow corridor to the LEFT of the origin
+        obstacles = [(-3.0, 3.25, 3.0), (-3.0, -3.25, 3.0)]
+    else:
+        obstacles = [(args.ox, args.oy, args.r)]
+
     x0 = np.array([args.x0x, args.x0y])
     xg = np.array([args.gx, args.gy])
+
+    # Helpers to pick position columns (prefer dynamic rollout if present)
+    def pos_xy(df):
+        if df is None:
+            return None
+        if {'x_dyn','y_dyn'} <= set(df.columns):
+            return df['x_dyn'].to_numpy(), df['y_dyn'].to_numpy(), 'dyn'
+        if {'x1','x2'} <= set(df.columns):
+            return df['x1'].to_numpy(), df['x2'].to_numpy(), 'x'
+        return None
 
     # Top: 2D position overlay
     ax = axes[0]
     ax.set_aspect('equal')
     th = np.linspace(0, 2*np.pi, 200)
-    ax.fill(x_obs[0] + r_obs*np.cos(th), x_obs[1] + r_obs*np.sin(th),
-            color='gray', alpha=0.4, label='Obstacle')
+    for i, (cx, cy, rr) in enumerate(obstacles):
+        ax.fill(cx + rr*np.cos(th), cy + rr*np.sin(th),
+                color='gray', alpha=0.4, label='Obstacle' if i == 0 else None)
 
-    if df_tv is not None:
-        ax.plot(df_tv['x1'], df_tv['x2'], 'r.-', label='TV-LIN', linewidth=2, markersize=3)
-    if df_psd is not None:
-        ax.plot(df_psd['x1'], df_psd['x2'], 'b.-', label='PSD', linewidth=2, markersize=3)
+    tv_pos = pos_xy(df_tv)
+    psd_pos = pos_xy(df_psd)
+    if tv_pos is not None:
+        x_tv, y_tv, _ = tv_pos
+        ax.plot(x_tv, y_tv, 'r.-', label='TV-LIN', linewidth=2, markersize=3)
+    if psd_pos is not None:
+        x_psd, y_psd, _ = psd_pos
+        ax.plot(x_psd, y_psd, 'b.-', label='PSD', linewidth=2, markersize=3)
 
     ax.scatter([x0[0]], [x0[1]], c='green', s=60, marker='o', label='Start')
     ax.scatter([xg[0]], [xg[1]], c='black', s=70, marker='*', label='Goal')
@@ -88,11 +123,27 @@ def main():
     def get_sd(df):
         if df is None:
             return None
+        # Prefer explicit signed distance columns if present
+        if 'sd_dyn' in df.columns:
+            return df['sd_dyn'].to_numpy()
+        if 'sd_min' in df.columns:
+            return df['sd_min'].to_numpy()
         if 'signed_dist' in df.columns:
             return df['signed_dist'].to_numpy()
+        # Compute from dynamic rollout columns if available
+        if 'x_dyn' in df.columns and 'y_dyn' in df.columns:
+            x1 = df['x_dyn'].to_numpy(); x2 = df['y_dyn'].to_numpy()
+            all_sd = []
+            for (cx, cy, rr) in obstacles:
+                all_sd.append(np.sqrt((x1-cx)**2 + (x2-cy)**2) - rr)
+            return np.min(np.vstack(all_sd), axis=0)
         if 'x1' in df.columns and 'x2' in df.columns:
             x1 = df['x1'].to_numpy(); x2 = df['x2'].to_numpy()
-            return np.sqrt((x1-args.ox)**2 + (x2-args.oy)**2) - args.r
+            # Compute min distance to all obstacles if geometry not baked into CSV
+            all_sd = []
+            for (cx, cy, rr) in obstacles:
+                all_sd.append(np.sqrt((x1-cx)**2 + (x2-cy)**2) - rr)
+            return np.min(np.vstack(all_sd), axis=0)
         return None
 
     # Middle: signed distance over time
