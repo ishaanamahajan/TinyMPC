@@ -24,6 +24,28 @@ target_link_libraries(rocket_landing_mpc LINK_PUBLIC tinympcstatic)
 add_executable(tiny_psd_demo tiny_psd_demo.cpp)
 target_link_libraries(tiny_psd_demo LINK_PUBLIC tinympcstatic)
 
+# PSD -> TV pipeline demo
+add_executable(tiny_psd_tv_demo tiny_psd_tv_demo.cpp)
+target_link_libraries(tiny_psd_tv_demo LINK_PUBLIC tinympcstatic)
+
+# PSD-regularized TV demo
+add_executable(tiny_psd_reg_tv_demo tiny_psd_reg_tv_demo.cpp)
+target_link_libraries(tiny_psd_reg_tv_demo LINK_PUBLIC tinympcstatic)
+
+# PSD -> TV pipeline narrow-2D demo
+add_executable(tiny_psd_tv_narrow2d tiny_psd_tv_narrow2d.cpp)
+target_link_libraries(tiny_psd_tv_narrow2d LINK_PUBLIC tinympcstatic)
+
+# PSD + TV narrow-2D linear corridor demo
+add_executable(tiny_tv_psd_reg_narrow2d tiny_tv_psd_reg_narrow2d.cpp)
+target_link_libraries(tiny_tv_psd_reg_narrow2d LINK_PUBLIC tinympcstatic)
+
+# U-shape demos (PSD vs TV)
+add_executable(tiny_psd_ushape_demo tiny_psd_ushape_demo.cpp)
+target_link_libraries(tiny_psd_ushape_demo LINK_PUBLIC tinympcstatic)
+add_executable(tiny_tv_ushape_demo tiny_tv_ushape_demo.cpp)
+target_link_libraries(tiny_tv_ushape_demo LINK_PUBLIC tinympcstatic)
+
 # PSD narrow-2D corridor demo
 add_executable(tiny_psd_demo_narrow2d tiny_psd_demo_narrow2d.cpp)
 target_link_libraries(tiny_psd_demo_narrow2d LINK_PUBLIC tinympcstatic)

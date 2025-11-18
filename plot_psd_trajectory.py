@@ -9,7 +9,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # Load trajectory data
-df = pd.read_csv('psd_trajectory.csv')
+#df = pd.read_csv('psd_trajectory.csv')
+#df = pd.read_csv('psd_tv_combo_trajectory.csv')
+df = pd.read_csv('psd_tv_pipeline_stage2_tv.csv')
 
 # Extract data
 k = df['k'].values
@@ -119,4 +121,5 @@ print(f"  Maximum:  {np.max(rank1_gap):.4f}")
 print(f"  Final:    {rank1_gap[-1]:.4f}")
 print(f"  Average:  {np.mean(rank1_gap):.4f}")
 print("="*60)
+
 
