@@ -68,6 +68,42 @@ def signed_distance_series(df, obstacles):
     return np.min(np.vstack(all_sd), axis=0)
 
 
+def seg_signed_dist_to_circle(p0, p1, c, r):
+    v = p1 - p0
+    vv = np.dot(v, v)
+    if vv == 0.0:
+        return np.linalg.norm(p0 - c) - r
+    t = np.clip(np.dot(c - p0, v) / vv, 0.0, 1.0)
+    closest = p0 + t * v
+    return np.linalg.norm(closest - c) - r
+
+
+def segmentwise_signed_distance_series(df, obstacles):
+    if df is None:
+        return None
+    if 'x1' in df and 'x2' in df:
+        x = df['x1'].to_numpy()
+        y = df['x2'].to_numpy()
+    elif 'x_dyn' in df and 'y_dyn' in df:
+        x = df['x_dyn'].to_numpy()
+        y = df['y_dyn'].to_numpy()
+    else:
+        return None
+    if len(x) < 2:
+        return None
+    sds = []
+    for k in range(len(x) - 1):
+        p0 = np.array([x[k],   y[k]])
+        p1 = np.array([x[k+1], y[k+1]])
+        best = np.inf
+        for (cx, cy, rr) in obstacles:
+            d = seg_signed_dist_to_circle(p0, p1, np.array([cx, cy]), rr)
+            if d < best:
+                best = d
+        sds.append(best)
+    return np.array(sds)
+
+
 def plot_narrow2d_overlay(args):
     runs = [
         ("PSD+TV (pipeline)", args.narrow_pipeline_csv, 'red', '-'),
@@ -152,7 +188,9 @@ def plot_narrow2d_overlay(args):
 
 
 def plot_regular_overlay(args):
-    if getattr(args, "use_ushape_obstacles", False):
+    use_ushape = getattr(args, "use_ushape_obstacles", False)
+    include_segment = use_ushape
+    if use_ushape:
         runs = [
             ("PSD (U-shape)", args.pipeline_csv, 'red', '-'),
             ("TV-only (U-shape)", args.tv_csv, 'green', ':'),
@@ -175,7 +213,7 @@ def plot_regular_overlay(args):
         print("No CSVs available for plotting.")
         return 1
 
-    if getattr(args, "use_ushape_obstacles", False):
+    if use_ushape:
         r_wall = 0.8
         obstacles = [
             (2.5,  0.0, r_wall),
@@ -193,7 +231,8 @@ def plot_regular_overlay(args):
         start = np.array([args.x0x, args.x0y])
         goal = np.array([args.gx, args.gy])
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 12))
+    fig_rows = 4 if include_segment else 3
+    fig, axes = plt.subplots(fig_rows, 1, figsize=(10, 12 if not include_segment else 14))
 
     ax = axes[0]
     ax.set_aspect('equal')
@@ -229,7 +268,24 @@ def plot_regular_overlay(args):
     ax.grid(True, alpha=0.3)
     ax.legend()
 
-    ax = axes[2]
+    seg_ax = axes[2] if include_segment else None
+    rank_ax = axes[3] if include_segment else axes[2]
+
+    if include_segment:
+        for label, df, color, style in data:
+            seg_sd = segmentwise_signed_distance_series(df, obstacles)
+            if seg_sd is None:
+                continue
+            seg_k = np.arange(len(seg_sd))
+            seg_ax.plot(seg_k, seg_sd, color=color, linestyle=style, linewidth=2, label=label)
+        seg_ax.axhline(0.0, color='black', linestyle='--', linewidth=1)
+        seg_ax.set_title('Segment-wise signed distance (collision check)')
+        seg_ax.set_xlabel('segment k→k+1')
+        seg_ax.set_ylabel('signed_dist')
+        seg_ax.grid(True, alpha=0.3)
+        seg_ax.legend()
+
+    ax = rank_ax
     for label, df, color, style in data:
         if {'k', 'rank1_gap'} <= set(df.columns):
             ax.plot(df['k'], df['rank1_gap'], color=color, linestyle=style, linewidth=2, label=label)
@@ -250,6 +306,9 @@ def plot_regular_overlay(args):
             print(f"{label}: min signed_dist = {sd.min():.4f}")
         if 'rank1_gap' in df.columns:
             print(f"{label}: max rank1_gap = {df['rank1_gap'].max():.4f}")
+        seg_sd = segmentwise_signed_distance_series(df, obstacles) if include_segment else None
+        if seg_sd is not None:
+            print(f"{label}: min segment signed_dist = {seg_sd.min():.4f}")
 
     return 0
 

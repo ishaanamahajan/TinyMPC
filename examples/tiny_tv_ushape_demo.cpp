@@ -59,11 +59,15 @@ extern "C" int main() {
     Mat x_max = Mat::Constant(nxL, N,  std::numeric_limits<tinytype>::infinity());
     x_min.topRows(NX0).setConstant(-30.0);
     x_max.topRows(NX0).setConstant( 30.0);
+    x_min.middleRows(NX0, NX0*NX0).setConstant(-1500.0);
+    x_max.middleRows(NX0, NX0*NX0).setConstant( 1500.0);
 
     Mat u_min = Mat::Constant(nuL, N-1, -std::numeric_limits<tinytype>::infinity());
     Mat u_max = Mat::Constant(nuL, N-1,  std::numeric_limits<tinytype>::infinity());
     u_min.topRows(NU0).setConstant(-3.0);
     u_max.topRows(NU0).setConstant( 3.0);
+    u_min.bottomRows(nxu + nux + nuu).setConstant(-120.0);
+    u_max.bottomRows(nxu + nux + nuu).setConstant( 120.0);
     tiny_set_bound_constraints(solver, x_min, x_max, u_min, u_max);
 
     Vec x0(NX0);
@@ -78,8 +82,8 @@ extern "C" int main() {
 
     Mat Xref = Mat::Zero(nxL, N);
     Mat Uref = Mat::Zero(nuL, N-1);
-    const tinytype q_xx = tinytype(0.5);
-    const tinytype r_uu = tinytype(5.0);
+    const tinytype q_xx = tinytype(1.0);
+    const tinytype r_uu = tinytype(10.0);
     for (int k = 0; k < N; ++k) {
         for (int i = 0; i < NX0; ++i) {
             int idx = NX0 + i*NX0 + i;
