@@ -11,7 +11,9 @@ import pandas as pd
 # Load trajectory data
 #df = pd.read_csv('psd_trajectory.csv')
 #df = pd.read_csv('psd_tv_combo_trajectory.csv')
-df = pd.read_csv('psd_tv_pipeline_stage2_tv.csv')
+df = pd.read_csv('psd_dynamic_tracking.csv')
+
+has_rank1 = 'rank1_gap' in df.columns
 
 # Extract data
 k = df['k'].values
@@ -21,7 +23,7 @@ x3 = df['x3'].values  # velocity x
 x4 = df['x4'].values  # velocity y
 u1 = df['u1'].values  # acceleration x
 u2 = df['u2'].values  # acceleration y
-rank1_gap = df['rank1_gap'].values
+rank1_gap = df['rank1_gap'].values if has_rank1 else None
 
 # Obstacle parameters (from demo)
 x_obs = np.array([-5.0, 0.0])
@@ -32,7 +34,11 @@ x_initial = np.array([-10.0, 0.1])
 x_final = np.array([0.0, 0.0])
 
 # Create figure with 4 subplots (matching Julia layout)
-fig, axes = plt.subplots(4, 1, figsize=(10, 14))
+num_rows = 4 if has_rank1 else 3
+fig, axes = plt.subplots(num_rows, 1, figsize=(10, 14))
+if num_rows == 1:
+    axes = [axes]
+axes = np.atleast_1d(axes)
 
 # ==================== Plot 1: 2D Trajectory with Obstacle ====================
 ax = axes[0]
@@ -81,16 +87,17 @@ ax.set_title('Controls (u)')
 ax.legend()
 ax.grid(True, alpha=0.3)
 
-# ==================== Plot 4: Rank-1 Gap (Residual Check) ====================
-ax = axes[3]
-ax.plot(k, rank1_gap, linewidth=2, label='‖XX - xx^T‖_F', color='purple')
+if has_rank1:
+    # ==================== Plot 4: Rank-1 Gap (Residual Check) ====================
+    ax = axes[3]
+    ax.plot(k, rank1_gap, linewidth=2, label='‖XX - xx^T‖_F', color='purple')
 
-ax.set_xlabel('Time Step')
-ax.set_ylabel('‖X - x⊗x\'‖')
-ax.set_title('Rank-1 Gap Check (SDP Relaxation Tightness)')
-ax.legend()
-ax.grid(True, alpha=0.3)
-ax.set_yscale('log')
+    ax.set_xlabel('Time Step')
+    ax.set_ylabel('‖X - x⊗x\'‖')
+    ax.set_title('Rank-1 Gap Check (SDP Relaxation Tightness)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_yscale('log')
 
 # ==================== Save Figure ====================
 plt.tight_layout()
@@ -115,11 +122,13 @@ min_idx = np.argmin(distances)
 print(f"\nClosest approach: {min_dist:.4f} at k={min_idx}")
 print(f"Safety margin:    {min_dist - r_obs:.4f} (should be ≥ 0)")
 
-# Rank-1 gap statistics
-print(f"\nRank-1 gap (XX ≈ xx^T):")
-print(f"  Maximum:  {np.max(rank1_gap):.4f}")
-print(f"  Final:    {rank1_gap[-1]:.4f}")
-print(f"  Average:  {np.mean(rank1_gap):.4f}")
+if has_rank1:
+    print(f"\nRank-1 gap (XX ≈ xx^T):")
+    print(f"  Maximum:  {np.max(rank1_gap):.4f}")
+    print(f"  Final:    {rank1_gap[-1]:.4f}")
+    print(f"  Average:  {np.mean(rank1_gap):.4f}")
+else:
+    print("\nRank-1 gap: not present in this CSV.")
 print("="*60)
 
 

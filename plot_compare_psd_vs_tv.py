@@ -19,6 +19,8 @@ from pathlib import Path
 DEFAULT_PIPELINE_CSV = "psd_tv_pipeline_stage2_tv.csv"
 DEFAULT_PSD_REG_CSV = "psd_tv_combo_trajectory.csv"
 DEFAULT_TV_CSV = "tv_linear_trajectory.csv"
+DEFAULT_CBF_CSV = "cbf_ushape_trajectory.csv"
+TRAJ_ONLY_OUT = "traj_compare.png"
 
 
 def load_csv(path):
@@ -104,6 +106,62 @@ def segmentwise_signed_distance_series(df, obstacles):
     return np.array(sds)
 
 
+def infer_start_from_data(data, fallback):
+    def first_point(entry):
+        label, df, _, _ = entry
+        xy = pos_xy(df)
+        if xy is None or len(xy[0]) == 0:
+            return None
+        return np.array([xy[0][0], xy[1][0]])
+
+    for entry in data:
+        label = entry[0]
+        if 'PSD' in label.upper():
+            pt = first_point(entry)
+            if pt is not None:
+                return pt
+    for entry in data:
+        pt = first_point(entry)
+        if pt is not None:
+            return pt
+    return fallback
+
+
+def save_traj_only_plot(outfile, data, obstacles, start, goal, title):
+    if not data:
+        return
+    theta = np.linspace(0, 2 * np.pi, 200)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.set_aspect('equal')
+    for idx, (cx, cy, rr) in enumerate(obstacles):
+        ax.fill(cx + rr * np.cos(theta),
+                cy + rr * np.sin(theta),
+                color='gray', alpha=0.35,
+                label='Obstacle' if idx == 0 else None)
+    has_traj = False
+    for label, df, color, style in data:
+        xy = pos_xy(df)
+        if xy is None:
+            continue
+        has_traj = True
+        ax.plot(xy[0], xy[1], color=color, linestyle=style, linewidth=2, label=label)
+    if not has_traj:
+        plt.close(fig)
+        print("Warning: no trajectory data available for trajectory-only plot.")
+        return
+    ax.scatter([start[0]], [start[1]], c='green', s=60, marker='o', label='Start')
+    ax.scatter([goal[0]], [goal[1]], c='black', s=70, marker='*', label='Goal')
+    ax.set_title(title)
+    ax.set_xlabel('x₁')
+    ax.set_ylabel('x₂')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(outfile, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✅ Trajectory-only plot saved to {outfile}")
+
+
 def plot_narrow2d_overlay(args):
     runs = [
         ("PSD+TV (pipeline)", args.narrow_pipeline_csv, 'red', '-'),
@@ -122,7 +180,7 @@ def plot_narrow2d_overlay(args):
         return 1
 
     obstacles = [(-3.0, 3.25, 3.0), (-3.0, -3.25, 3.0)]
-    start = np.array([-8.0, -4.0])
+    start = infer_start_from_data(data, np.array([-8.0, -4.0]))
     goal = np.array([0.0, 0.0])
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 12))
@@ -176,6 +234,7 @@ def plot_narrow2d_overlay(args):
     plt.tight_layout()
     plt.savefig(args.out, dpi=150, bbox_inches='tight')
     print(f"✅ Narrow-2D comparison saved to {args.out}")
+    save_traj_only_plot(TRAJ_ONLY_OUT, data, obstacles, start, goal, "Narrow-2D trajectories")
 
     for label, df, _, _ in data:
         sd = signed_distance_series(df, obstacles)
@@ -192,9 +251,12 @@ def plot_regular_overlay(args):
     include_segment = use_ushape
     if use_ushape:
         runs = [
-            ("PSD (U-shape)", args.pipeline_csv, 'red', '-'),
-            ("TV-only (U-shape)", args.tv_csv, 'green', ':'),
+            ("PSD", args.pipeline_csv, 'red', '-'),
+            ("TV-only", args.tv_csv, 'green', '-'),
         ]
+        cbf_csv = getattr(args, "cbf_csv", None)
+        if cbf_csv:
+            runs.append(("CBF", cbf_csv, 'purple', '-'))
     else:
         runs = [
             ("PSD+TV (pipeline)", args.pipeline_csv, 'red', '-'),
@@ -224,11 +286,11 @@ def plot_regular_overlay(args):
             (5.0,  1.2, r_wall),
             (5.0, -1.2, r_wall),
         ]
-        start = np.array([6.0, 0.0])
+        start = infer_start_from_data(data, np.array([6.0, 0.0]))
         goal = np.array([0.0, 0.0])
     else:
         obstacles = [(args.ox, args.oy, args.r)]
-        start = np.array([args.x0x, args.x0y])
+        start = infer_start_from_data(data, np.array([args.x0x, args.x0y]))
         goal = np.array([args.gx, args.gy])
 
     fig_rows = 4 if include_segment else 3
@@ -299,6 +361,8 @@ def plot_regular_overlay(args):
     plt.tight_layout()
     plt.savefig(args.out, dpi=150, bbox_inches='tight')
     print(f"✅ Comparison plot saved to {args.out}")
+    traj_title = "U-shape trajectories" if use_ushape else "Regular scenario trajectories"
+    save_traj_only_plot(TRAJ_ONLY_OUT, data, obstacles, start, goal, traj_title)
 
     for label, df, _, _ in data:
         sd = signed_distance_series(df, obstacles)
@@ -336,6 +400,8 @@ def main():
                     help="Use U-shape PSD/TV CSVs")
     ap.add_argument("--u", action="store_true",
                     help="Alias for --ushape")
+    ap.add_argument("--cbf_csv", default=DEFAULT_CBF_CSV,
+                    help="CBF CSV (used with --ushape comparisons)")
     ap.add_argument("--ox", type=float, default=-5.0, help="Obstacle center x")
     ap.add_argument("--oy", type=float, default=0.0, help="Obstacle center y")
     ap.add_argument("--r", type=float, default=2.0, help="Obstacle radius")

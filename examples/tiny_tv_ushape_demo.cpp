@@ -71,14 +71,7 @@ extern "C" int main() {
     tiny_set_bound_constraints(solver, x_min, x_max, u_min, u_max);
 
     Vec x0(NX0);
-    x0 << 6.0, 0.0, 0.0, 0.0;
-    Vec x0_lift(nxL); x0_lift.setZero();
-    x0_lift.topRows(NX0) = x0;
-    Mat X0 = x0 * x0.transpose();
-    for (int j = 0; j < NX0; ++j)
-        for (int i = 0; i < NX0; ++i)
-            x0_lift(NX0 + j*NX0 + i) = X0(i, j);
-    tiny_set_x0(solver, x0_lift);
+    x0 << 6.0, -1.0, 0.0, 0.0;
 
     Mat Xref = Mat::Zero(nxL, N);
     Mat Uref = Mat::Zero(nuL, N-1);
@@ -127,45 +120,54 @@ extern "C" int main() {
         return best;
     };
 
-    tiny_solve(solver);
-    int iters = solver->solution->iter;
+    auto build_lifted = [&](const Vec& base_state) {
+        Vec lifted(nxL);
+        lifted.setZero();
+        lifted.topRows(NX0) = base_state;
+        Mat outer = base_state * base_state.transpose();
+        for (int j = 0; j < NX0; ++j) {
+            for (int i = 0; i < NX0; ++i) {
+                lifted(NX0 + j*NX0 + i) = outer(i, j);
+            }
+        }
+        return lifted;
+    };
 
     Vec x_dyn = x0;
-    std::vector<Vec> Xdyn(N);
-    Xdyn[0] = x_dyn;
-    for (int k = 0; k < N-1; ++k) {
-        Vec u_base = solver->solution->u.col(k).topRows(NU0);
-        x_dyn = Ad * x_dyn + Bd * u_base;
-        Xdyn[k+1] = x_dyn;
-    }
+    const int steps = N - 1;
+    Vec zero_u = Vec::Zero(NU0);
+    double min_sd = signed_distance(x_dyn(0), x_dyn(1));
 
     std::ofstream csv("../tv_ushape_trajectory.csv");
-    if (csv.is_open()) {
-        csv << "k,x1,x2,x3,x4,u1,u2,signed_dist,iter\n";
-        for (int k = 0; k < N; ++k) {
-            Vec xk_dyn = Xdyn[k];
-            double sd = signed_distance(xk_dyn(0), xk_dyn(1));
-            csv << k << "," << xk_dyn(0) << "," << xk_dyn(1) << "," << xk_dyn(2) << "," << xk_dyn(3);
-            if (k < N-1) {
-                Vec uk = solver->solution->u.col(k);
-                csv << "," << uk(0) << "," << uk(1);
-            } else {
-                csv << ",0,0";
-            }
-            csv << "," << sd << "," << iters << "\n";
-        }
-        csv.close();
-        std::cout << "[TV-U] Exported tv_ushape_trajectory.csv\n";
-    } else {
+    if (!csv.is_open()) {
         std::cout << "[TV-U] Failed to open tv_ushape_trajectory.csv\n";
+        return 1;
     }
 
-    double min_sd = std::numeric_limits<double>::infinity();
-    for (int k = 0; k < N; ++k) {
-        Vec xk = solver->solution->x.col(k);
-        double sd = signed_distance(xk(0), xk(1));
+    csv << "k,x1,x2,x3,x4,u1,u2,signed_dist,iter\n";
+
+    auto write_row = [&](int k, const Vec& xstate, const Vec& ustate, double sd, int iters) {
+        csv << k << "," << xstate(0) << "," << xstate(1) << "," << xstate(2) << "," << xstate(3)
+            << "," << ustate(0) << "," << ustate(1) << "," << sd << "," << iters << "\n";
+    };
+
+    write_row(0, x_dyn, zero_u, min_sd, 0);
+
+    for (int k = 0; k < steps; ++k) {
+        Vec x_lift = build_lifted(x_dyn);
+        tiny_set_x0(solver, x_lift);
+        tiny_solve(solver);
+
+        Vec u0 = solver->solution->u.col(0).topRows(NU0);
+        x_dyn = Ad * x_dyn + Bd * u0;
+        double sd = signed_distance(x_dyn(0), x_dyn(1));
         if (sd < min_sd) min_sd = sd;
+
+        write_row(k+1, x_dyn, u0, sd, solver->solution->iter);
     }
+
+    csv.close();
+    std::cout << "[TV-U] Exported tv_ushape_trajectory.csv\n";
     std::cout << "[TV-U] Min signed distance to U-shape: " << min_sd << "\n";
 
     return 0;
