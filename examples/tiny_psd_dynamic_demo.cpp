@@ -152,18 +152,78 @@ double signed_distance_point_disks(const Vec& x,
     return best;
 }
 
+double signed_distance_segment_disks(const Vec& p0,
+                                     const Vec& p1,
+                                     const std::vector<std::array<tinytype,3>>& disks) {
+    double best = std::numeric_limits<double>::infinity();
+    double x0 = static_cast<double>(p0(0));
+    double y0 = static_cast<double>(p0(1));
+    double x1 = static_cast<double>(p1(0));
+    double y1 = static_cast<double>(p1(1));
+    double dx = x1 - x0;
+    double dy = y1 - y0;
+    double len2 = dx*dx + dy*dy;
+    for (const auto& d : disks) {
+        double cx = static_cast<double>(d[0]);
+        double cy = static_cast<double>(d[1]);
+        double r  = static_cast<double>(d[2]);
+        double t = 0.0;
+        if (len2 > 0.0) {
+            t = ((cx - x0)*dx + (cy - y0)*dy) / len2;
+            t = std::max(0.0, std::min(1.0, t));
+        }
+        double px = x0 + t*dx;
+        double py = y0 + t*dy;
+        double sd = std::sqrt((px - cx)*(px - cx) + (py - cy)*(py - cy)) - r;
+        if (sd < best) {
+            best = sd;
+        }
+    }
+    return best;
+}
+
+double min_prediction_signed_distance(
+    const Vec& x,
+    const std::vector<std::vector<std::array<tinytype,3>>>& disks_per_stage) {
+    if (disks_per_stage.empty()) {
+        return std::numeric_limits<double>::infinity();
+    }
+    double best = std::numeric_limits<double>::infinity();
+    for (const auto& stage : disks_per_stage) {
+        double sd = signed_distance_point_disks(x, stage);
+        if (sd < best) {
+            best = sd;
+        }
+    }
+    return best;
+}
+
 int clamp_index(int idx, int lo, int hi) {
     if (idx < lo) return lo;
     if (idx > hi) return hi;
     return idx;
 }
 
+enum class PlanMode {
+    PSD,
+    NOMINAL,
+};
+
 struct PlanCache {
     std::vector<Vec> states;
     std::vector<Vec> inputs;
     int start_step = 0;
     int last_iters = 0;
+    PlanMode mode = PlanMode::PSD;
 };
+
+const char* plan_mode_str(PlanMode mode) {
+    switch (mode) {
+        case PlanMode::PSD: return "psd";
+        case PlanMode::NOMINAL: return "nominal";
+        default: return "unknown";
+    }
+}
 
 void rollout_plan(const Mat& Ad,
                   const Mat& Bd,
@@ -244,8 +304,7 @@ extern "C" int main() {
     R.diagonal().segment(NU0 + nxu + nux, nuu).array() = tinytype(250.0);
 
     Vec fdyn = Vec::Zero(nxL);
-    const tinytype rho_psd = tinytype(5.0);
-    const tinytype rho_track = tinytype(5.0);
+    const tinytype rho_base = tinytype(5.0);
     const tinytype rho_psd_penalty = tinytype(0.95);
 
     Mat x_min = Mat::Constant(nxL, N, -std::numeric_limits<tinytype>::infinity());
@@ -268,22 +327,22 @@ extern "C" int main() {
     DynamicObstacles obstacles;
     obstacles.dt = tinytype(1.0);
     obstacles.agents = {
-        // Downward crossing traffic upstream of the goal
-        { tinytype(-5.0), tinytype( 3.0), tinytype(0.0), tinytype(-0.12),
-          tinytype(0.9), tinytype(0.15), tinytype(0.8), tinytype(0.0),
-          tinytype(0.05), tinytype(0.6), tinytype(0.0) },
-        // Upward crossing traffic closer to mid-corridor
-        { tinytype(-2.0), tinytype(-3.5), tinytype(0.0), tinytype( 0.10),
-          tinytype(0.8), tinytype(0.12), tinytype(0.7), tinytype(1.2),
-          tinytype(0.04), tinytype(0.7), tinytype(0.5) },
-        // Drifting obstacle that stays to the right of the goal
-        { tinytype(1.8), tinytype( 1.5), tinytype(0.02), tinytype(-0.06),
-          tinytype(0.7), tinytype(0.1), tinytype(0.5), tinytype(-0.4),
-          tinytype(0.03), tinytype(0.5), tinytype(0.9) }
+        // Static blocker far upstream
+        { tinytype(-7.0), tinytype( 0.0), tinytype(0.0), tinytype(0.0),
+          tinytype(1.0), tinytype(0.02), tinytype(0.3), tinytype(0.0),
+          tinytype(0.02), tinytype(0.4), tinytype(0.0) },
+        // Upper mover near x ≈ -4 wobbling up/down
+        { tinytype(-4.2), tinytype( 1.7), tinytype(0.02), tinytype(-0.08),
+          tinytype(0.9), tinytype(0.05), tinytype(0.4), tinytype(0.3),
+          tinytype(0.06), tinytype(0.7), tinytype(0.2) },
+        // Lower mover mirroring the upper one
+        { tinytype(-3.8), tinytype(-1.7), tinytype(0.015), tinytype(0.08),
+          tinytype(0.9), tinytype(0.05), tinytype(0.4), tinytype(0.9),
+          tinytype(0.06), tinytype(0.7), tinytype(0.5) }
     };
 
     TinySolver* solver_psd = nullptr;
-    if (tiny_setup(&solver_psd, A, B, fdyn, Q, R, rho_psd, nxL, nuL, N, /*verbose=*/1)) {
+    if (tiny_setup(&solver_psd, A, B, fdyn, Q, R, rho_base, nxL, nuL, N, /*verbose=*/1)) {
         return 1;
     }
     solver_psd->settings->adaptive_rho = 0;
@@ -294,7 +353,7 @@ extern "C" int main() {
     tiny_set_u_ref(solver_psd, diag_refs_psd.second);
 
     TinySolver* solver_track = nullptr;
-    if (tiny_setup(&solver_track, A, B, fdyn, Q, R, rho_track, nxL, nuL, N, /*verbose=*/1)) {
+    if (tiny_setup(&solver_track, A, B, fdyn, Q, R, rho_base, nxL, nuL, N, /*verbose=*/1)) {
         return 1;
     }
     solver_track->settings->adaptive_rho = 0;
@@ -306,41 +365,74 @@ extern "C" int main() {
 
     const int total_steps = 90;
     const int replan_stride = 6;
-    const tinytype inflation_rate = tinytype(0.02);
+    const tinytype prediction_inflation = tinytype(0.01);
     const int horizon_guard = 5;
+    const int psd_obstacle_horizon = std::min(N, 18);
+    const double psd_on_distance = 2.5;
+    const double psd_off_distance = 3.5;
 
     std::ofstream csv_plan("../psd_dynamic_plan_log.csv");
     if (csv_plan.is_open()) {
-        csv_plan << "replan_step,iter,num_disks,min_sd_seed\n";
+        csv_plan << "replan_step,plan_type,iter,num_disks,min_sd_seed,min_sd_prediction\n";
     }
     std::ofstream csv_track("../psd_dynamic_tracking.csv");
     if (csv_track.is_open()) {
-        csv_track << "k,x1,x2,x3,x4,u1,u2,signed_dist,plan_age,solver_iter\n";
+        csv_track << "k,x1,x2,x3,x4,u1,u2,signed_dist,seg_signed_dist,plan_age,solver_iter\n";
     }
     std::ofstream csv_obstacles("../psd_dynamic_obstacles.csv");
     if (csv_obstacles.is_open()) {
         csv_obstacles << "k,disk,cx,cy,r\n";
     }
 
-    auto replan_psd = [&](int step, const Vec& x_seed) {
+    bool psd_constraints_active = false;
+
+    auto replan_plan = [&](int step, const Vec& x_seed) {
+        auto per_stage = obstacles.horizon_disks_per_stage(
+            step, psd_obstacle_horizon, prediction_inflation);
+        double min_sd_prediction = min_prediction_signed_distance(x_seed, per_stage);
+
+        if (!psd_constraints_active && min_sd_prediction < psd_on_distance) {
+            psd_constraints_active = true;
+        } else if (psd_constraints_active && min_sd_prediction > psd_off_distance) {
+            psd_constraints_active = false;
+        }
+
+        if (psd_constraints_active) {
+            solver_psd->settings->en_psd = 1;
+            tiny_set_lifted_disks_tv(solver_psd, per_stage);
+        } else {
+            solver_psd->settings->en_psd = 0;
+            solver_psd->settings->en_tv_state_linear = 0;
+        }
+
         Vec x_lift = build_lifted(x_seed);
         tiny_set_x0(solver_psd, x_lift);
-        auto per_stage = obstacles.horizon_disks_per_stage(step, N, inflation_rate);
-        tiny_set_lifted_disks_tv(solver_psd, per_stage);
         tiny_solve(solver_psd);
         rollout_plan(Ad, Bd, x_seed, solver_psd, &plan);
         plan.start_step = step;
+        plan.mode = psd_constraints_active ? PlanMode::PSD : PlanMode::NOMINAL;
+
+        auto disks_now = obstacles.disks_at_step(step);
+        double sd_seed = signed_distance_point_disks(x_seed, disks_now);
+
         std::size_t disk_count = 0;
-        for (const auto& stage : per_stage) disk_count += stage.size();
+        for (const auto& stage : per_stage) {
+            disk_count += stage.size();
+        }
+        if (!psd_constraints_active) {
+            disk_count = 0;
+        }
+
         if (csv_plan.is_open()) {
-            auto disks_now = obstacles.disks_at_step(step);
-            double sd_seed = signed_distance_point_disks(x_seed, disks_now);
-            csv_plan << step << "," << plan.last_iters << "," << disk_count
-                     << "," << sd_seed << "\n";
+            csv_plan << step << "," << plan_mode_str(plan.mode) << ","
+                     << plan.last_iters << "," << disk_count << ","
+                     << sd_seed << "," << min_sd_prediction << "\n";
         }
         std::cout << "[PSD-DYN] Replan at k=" << step
+                  << " mode=" << plan_mode_str(plan.mode)
                   << " iter=" << plan.last_iters
-                  << " disks=" << disk_count << "\n";
+                  << " disks=" << disk_count
+                  << " min_sd_pred=" << min_sd_prediction << "\n";
     };
 
     auto log_obstacles = [&](int step) {
@@ -353,47 +445,52 @@ extern "C" int main() {
     };
 
     auto log_tracking_row = [&](int step, const Vec& state, const Vec& input,
-                                double sd, int plan_age, int iters) {
+                                double sd_point, double sd_segment,
+                                int plan_age, int iters) {
         if (!csv_track.is_open()) return;
         csv_track << step << "," << state(0) << "," << state(1) << "," << state(2) << "," << state(3)
-                  << "," << input(0) << "," << input(1) << "," << sd
-                  << "," << plan_age << "," << iters << "\n";
+                  << "," << input(0) << "," << input(1) << "," << sd_point
+                  << "," << sd_segment << "," << plan_age << "," << iters << "\n";
     };
 
-    replan_psd(0, x_track);
+    replan_plan(0, x_track);
 
     auto disks_init = obstacles.disks_at_step(0);
     double sd0 = signed_distance_point_disks(x_track, disks_init);
     Vec zero_u = Vec::Zero(NU0);
     log_obstacles(0);
-    log_tracking_row(0, x_track, zero_u, sd0, /*plan_age=*/0, /*iters=*/0);
+    log_tracking_row(0, x_track, zero_u, sd0, sd0, /*plan_age=*/0, /*iters=*/0);
 
     double min_sd_track = sd0;
 
+    Vec prev_state = x_track;
     for (int k = 0; k < total_steps; ++k) {
         bool need_replan = (k == 0)
                         || (k - plan.start_step >= replan_stride)
                         || (k >= plan.start_step + N - horizon_guard);
         if (need_replan && k > 0) {
-            replan_psd(k, x_track);
+            replan_plan(k, x_track);
         }
 
         set_tracking_refs(solver_track, plan, k, diag_refs_track.first, diag_refs_track.second);
         tiny_set_x0(solver_track, build_lifted(x_track));
         tiny_solve(solver_track);
         Vec u0 = solver_track->solution->u.col(0).topRows(NU0);
+        prev_state = x_track;
         x_track = Ad * x_track + Bd * u0;
 
         int step_idx = k + 1;
         log_obstacles(step_idx);
         auto disks_now = obstacles.disks_at_step(step_idx);
-        double sd = signed_distance_point_disks(x_track, disks_now);
-        if (sd < min_sd_track) {
-            min_sd_track = sd;
+        double sd_point = signed_distance_point_disks(x_track, disks_now);
+        double sd_segment = signed_distance_segment_disks(prev_state, x_track, disks_now);
+        if (sd_segment < min_sd_track) {
+            min_sd_track = sd_segment;
         }
 
         int plan_age = step_idx - plan.start_step;
-        log_tracking_row(step_idx, x_track, u0, sd, plan_age, solver_track->solution->iter);
+        log_tracking_row(step_idx, x_track, u0, sd_point, sd_segment,
+                         plan_age, solver_track->solution->iter);
     }
 
     if (csv_plan.is_open()) csv_plan.close();

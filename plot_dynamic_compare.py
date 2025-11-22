@@ -142,7 +142,12 @@ def main() -> None:
     for label, df, color, style in data:
         if "signed_dist" not in df.columns:
             continue
-        ax.plot(df["k"], df["signed_dist"], color=color, linestyle=style, linewidth=2, label=label)
+        sd_col = "seg_signed_dist" if "seg_signed_dist" in df.columns else "signed_dist"
+        ax.plot(df["k"], df[sd_col], color=color, linestyle=style, linewidth=2,
+                label=f"{label} (segment)")
+        if sd_col != "signed_dist":
+            ax.plot(df["k"], df["signed_dist"], color=color, linestyle=":",
+                    linewidth=1.2, alpha=0.6, label=f"{label} (point)")
     ax.axhline(0.0, color="black", linestyle="--", linewidth=1)
     ax.set_title("Signed distance to nearest disk")
     ax.set_xlabel("Step k")
@@ -258,7 +263,8 @@ def main() -> None:
 
     for label, df, _, _ in data:
         if "signed_dist" in df.columns:
-            print(f"{label}: min signed distance = {df['signed_dist'].min():.3f}")
+            sd_col = "seg_signed_dist" if "seg_signed_dist" in df.columns else "signed_dist"
+            print(f"{label}: min signed distance = {df[sd_col].min():.3f}")
 
 
 if __name__ == "__main__":

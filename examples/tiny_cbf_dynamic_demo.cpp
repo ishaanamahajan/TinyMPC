@@ -13,6 +13,8 @@ namespace {
 using Vec2 = Eigen::Matrix<tinytype, 2, 1>;
 using Mat22 = Eigen::Matrix<tinytype, 2, 2>;
 using Row2 = Eigen::Matrix<tinytype, 1, 2>;
+constexpr int H_OBS = 18;
+const tinytype PREDICTION_INFLATION = tinytype(0.01);
 
 struct QPConstraint {
     Row2 a;
@@ -61,6 +63,24 @@ struct DynamicObstacles {
         return disks;
     }
 };
+
+std::vector<std::vector<std::array<tinytype,3>>> build_prediction(
+    const DynamicObstacles& obs,
+    int step,
+    int horizon,
+    tinytype inflation_rate) {
+    std::vector<std::vector<std::array<tinytype,3>>> per_stage;
+    per_stage.reserve(horizon);
+    for (int h = 0; h < horizon; ++h) {
+        auto disks = obs.disks_at_step(step + h);
+        tinytype inflate = inflation_rate * tinytype(std::sqrt(static_cast<double>(h)));
+        for (auto& d : disks) {
+            d[2] += inflate;
+        }
+        per_stage.push_back(std::move(disks));
+    }
+    return per_stage;
+}
 
 bool satisfies(const Vec2& u,
                const std::vector<QPConstraint>& constraints,
@@ -184,6 +204,37 @@ double signed_distance_point_disks(double x,
     return best;
 }
 
+double signed_distance_segment_disks(
+    const Eigen::Matrix<tinytype, Eigen::Dynamic, 1>& p0,
+    const Eigen::Matrix<tinytype, Eigen::Dynamic, 1>& p1,
+    const std::vector<std::array<tinytype,3>>& disks) {
+    double best = std::numeric_limits<double>::infinity();
+    double x0 = static_cast<double>(p0(0));
+    double y0 = static_cast<double>(p0(1));
+    double x1 = static_cast<double>(p1(0));
+    double y1 = static_cast<double>(p1(1));
+    double dx = x1 - x0;
+    double dy = y1 - y0;
+    double len2 = dx*dx + dy*dy;
+    for (const auto& d : disks) {
+        double cx = static_cast<double>(d[0]);
+        double cy = static_cast<double>(d[1]);
+        double r  = static_cast<double>(d[2]);
+        double t = 0.0;
+        if (len2 > 0.0) {
+            t = ((cx - x0)*dx + (cy - y0)*dy) / len2;
+            t = std::max(0.0, std::min(1.0, t));
+        }
+        double px = x0 + t*dx;
+        double py = y0 + t*dy;
+        double sd = std::sqrt((px - cx)*(px - cx) + (py - cy)*(py - cy)) - r;
+        if (sd < best) {
+            best = sd;
+        }
+    }
+    return best;
+}
+
 }  // namespace
 
 extern "C" int main() {
@@ -211,15 +262,15 @@ extern "C" int main() {
     DynamicObstacles obstacles;
     obstacles.dt = tinytype(1.0);
     obstacles.agents = {
-        { tinytype(-5.0), tinytype( 3.0), tinytype(0.0), tinytype(-0.12),
-          tinytype(0.9), tinytype(0.15), tinytype(0.8), tinytype(0.0),
-          tinytype(0.05), tinytype(0.6), tinytype(0.0) },
-        { tinytype(-2.0), tinytype(-3.5), tinytype(0.0), tinytype( 0.10),
-          tinytype(0.8), tinytype(0.12), tinytype(0.7), tinytype(1.2),
-          tinytype(0.04), tinytype(0.7), tinytype(0.5) },
-        { tinytype(1.8), tinytype( 1.5), tinytype(0.02), tinytype(-0.06),
-          tinytype(0.7), tinytype(0.1), tinytype(0.5), tinytype(-0.4),
-          tinytype(0.03), tinytype(0.5), tinytype(0.9) }
+        { tinytype(-7.0), tinytype( 0.0), tinytype(0.0), tinytype(0.0),
+          tinytype(1.0), tinytype(0.02), tinytype(0.3), tinytype(0.0),
+          tinytype(0.02), tinytype(0.4), tinytype(0.0) },
+        { tinytype(-4.2), tinytype( 1.7), tinytype(0.02), tinytype(-0.08),
+          tinytype(0.9), tinytype(0.05), tinytype(0.4), tinytype(0.3),
+          tinytype(0.06), tinytype(0.7), tinytype(0.2) },
+        { tinytype(-3.8), tinytype(-1.7), tinytype(0.015), tinytype(0.08),
+          tinytype(0.9), tinytype(0.05), tinytype(0.4), tinytype(0.9),
+          tinytype(0.06), tinytype(0.7), tinytype(0.5) }
     };
 
     const int total_steps = 90;
@@ -248,7 +299,7 @@ extern "C" int main() {
         std::cout << "[CBF-DYN] Failed to open cbf_dynamic_tracking.csv\n";
         return 1;
     }
-    csv << "k,x1,x2,x3,x4,u1,u2,signed_dist,cbf_relax,cbf_margin\n";
+    csv << "k,x1,x2,x3,x4,u1,u2,signed_dist,seg_signed_dist,cbf_relax,cbf_margin\n";
     std::ofstream csv_obs("../cbf_dynamic_obstacles.csv");
     if (csv_obs.is_open()) {
         csv_obs << "k,disk,cx,cy,r\n";
@@ -266,12 +317,16 @@ extern "C" int main() {
     auto disks0 = obstacles.disks_at_step(0);
     double sd0 = signed_distance_point_disks(x(0), x(1), disks0);
     csv << 0 << "," << x(0) << "," << x(1) << "," << x(2) << "," << x(3)
-        << ",0,0," << sd0 << ",0,0\n";
+        << ",0,0," << sd0 << "," << sd0 << ",0,0\n";
     log_obstacles(0);
     double min_sd = sd0;
+    Vec prev_state = x;
 
     for (int k = 0; k < total_steps; ++k) {
-        auto disks = obstacles.disks_at_step(k);
+        auto prediction = build_prediction(obstacles, k, H_OBS, PREDICTION_INFLATION);
+        const auto& disks = prediction.empty()
+            ? obstacles.disks_at_step(k)
+            : prediction.front();
         Vec2 z = x.topRows(2);
         Vec2 v = x.bottomRows(2);
 
@@ -335,17 +390,20 @@ extern "C" int main() {
         relax_hist[k] = used_relax;
         margin_hist[k] = min_margin;
 
+        prev_state = x;
         x = Ad * x + Bd * u;
         Xdyn[k + 1] = x;
 
         int step_idx = k + 1;
         log_obstacles(step_idx);
         auto disks_next = obstacles.disks_at_step(step_idx);
-        double sd = signed_distance_point_disks(x(0), x(1), disks_next);
-        if (sd < min_sd) min_sd = sd;
+        double sd_point = signed_distance_point_disks(x(0), x(1), disks_next);
+        double sd_segment = signed_distance_segment_disks(prev_state, x, disks_next);
+        if (sd_segment < min_sd) min_sd = sd_segment;
 
         csv << step_idx << "," << x(0) << "," << x(1) << "," << x(2) << "," << x(3)
-            << "," << u(0) << "," << u(1) << "," << sd << "," << used_relax << "," << min_margin << "\n";
+            << "," << u(0) << "," << u(1) << "," << sd_point << "," << sd_segment
+            << "," << used_relax << "," << min_margin << "\n";
     }
 
     csv.close();
