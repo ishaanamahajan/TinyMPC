@@ -141,7 +141,7 @@ extern "C" int main() {
     tiny_set_bound_constraints(solver, x_min, x_max, u_min, u_max);
 
     Vec x0(NX0);
-    x0 << -8.0, 0.0, 0.0, 0.0;
+    x0 << -10.0, 0.0, 0.0, 0.0;
 
     Mat Xref = Mat::Zero(nxL, N);
     Mat Uref = Mat::Zero(nuL, N-1);
@@ -168,13 +168,13 @@ extern "C" int main() {
     DynamicObstacles obstacles;
     obstacles.dt = tinytype(1.0);
     obstacles.agents = {
-        { tinytype(0.5), tinytype( 3.0), tinytype(0.0), tinytype(-0.12),
+        { tinytype(-5.0), tinytype( 3.0), tinytype(0.0), tinytype(-0.12),
           tinytype(0.9), tinytype(0.15), tinytype(0.8), tinytype(0.0),
           tinytype(0.05), tinytype(0.6), tinytype(0.0) },
-        { tinytype(2.5), tinytype(-3.5), tinytype(0.0), tinytype( 0.10),
+        { tinytype(-2.0), tinytype(-3.5), tinytype(0.0), tinytype( 0.10),
           tinytype(0.8), tinytype(0.12), tinytype(0.7), tinytype(1.2),
           tinytype(0.04), tinytype(0.7), tinytype(0.5) },
-        { tinytype(4.0), tinytype( 1.5), tinytype(0.02), tinytype(-0.06),
+        { tinytype(1.8), tinytype( 1.5), tinytype(0.02), tinytype(-0.06),
           tinytype(0.7), tinytype(0.1), tinytype(0.5), tinytype(-0.4),
           tinytype(0.03), tinytype(0.5), tinytype(0.9) }
     };

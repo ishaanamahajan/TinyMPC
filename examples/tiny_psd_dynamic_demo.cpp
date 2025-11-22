@@ -72,6 +72,23 @@ struct DynamicObstacles {
         }
         return disks;
     }
+
+    std::vector<std::vector<std::array<tinytype,3>>> horizon_disks_per_stage(
+        int step,
+        int horizon,
+        tinytype inflation_rate) const {
+        std::vector<std::vector<std::array<tinytype,3>>> per_stage;
+        per_stage.reserve(horizon);
+        for (int h = 0; h < horizon; ++h) {
+            auto disks = disks_at_step(step + h);
+            tinytype inflate = inflation_rate * tinytype(std::sqrt(static_cast<double>(h)));
+            for (auto& d : disks) {
+                d[2] += inflate;
+            }
+            per_stage.push_back(std::move(disks));
+        }
+        return per_stage;
+    }
 };
 
 Vec build_lifted(const Vec& base_state) {
@@ -246,21 +263,21 @@ extern "C" int main() {
     u_max.bottomRows(nxu + nux + nuu).setConstant( 120.0);
 
     Vec x0(NX0);
-    x0 << -8.0, 0.0, 0.0, 0.0;
+    x0 << -10.0, 0.0, 0.0, 0.0;
 
     DynamicObstacles obstacles;
     obstacles.dt = tinytype(1.0);
     obstacles.agents = {
-        // Downward crossing traffic near the origin
-        { tinytype(0.5), tinytype( 3.0), tinytype(0.0), tinytype(-0.12),
+        // Downward crossing traffic upstream of the goal
+        { tinytype(-5.0), tinytype( 3.0), tinytype(0.0), tinytype(-0.12),
           tinytype(0.9), tinytype(0.15), tinytype(0.8), tinytype(0.0),
           tinytype(0.05), tinytype(0.6), tinytype(0.0) },
-        // Upward crossing traffic slightly to the right
-        { tinytype(2.5), tinytype(-3.5), tinytype(0.0), tinytype( 0.10),
+        // Upward crossing traffic closer to mid-corridor
+        { tinytype(-2.0), tinytype(-3.5), tinytype(0.0), tinytype( 0.10),
           tinytype(0.8), tinytype(0.12), tinytype(0.7), tinytype(1.2),
           tinytype(0.04), tinytype(0.7), tinytype(0.5) },
-        // Slightly drifting obstacle to bias detours in +y
-        { tinytype(4.0), tinytype( 1.5), tinytype(0.02), tinytype(-0.06),
+        // Drifting obstacle that stays to the right of the goal
+        { tinytype(1.8), tinytype( 1.5), tinytype(0.02), tinytype(-0.06),
           tinytype(0.7), tinytype(0.1), tinytype(0.5), tinytype(-0.4),
           tinytype(0.03), tinytype(0.5), tinytype(0.9) }
     };
@@ -308,20 +325,22 @@ extern "C" int main() {
     auto replan_psd = [&](int step, const Vec& x_seed) {
         Vec x_lift = build_lifted(x_seed);
         tiny_set_x0(solver_psd, x_lift);
-        auto horizon = obstacles.horizon_disks(step, N, inflation_rate);
-        tiny_set_lifted_disks(solver_psd, horizon);
+        auto per_stage = obstacles.horizon_disks_per_stage(step, N, inflation_rate);
+        tiny_set_lifted_disks_tv(solver_psd, per_stage);
         tiny_solve(solver_psd);
         rollout_plan(Ad, Bd, x_seed, solver_psd, &plan);
         plan.start_step = step;
+        std::size_t disk_count = 0;
+        for (const auto& stage : per_stage) disk_count += stage.size();
         if (csv_plan.is_open()) {
             auto disks_now = obstacles.disks_at_step(step);
             double sd_seed = signed_distance_point_disks(x_seed, disks_now);
-            csv_plan << step << "," << plan.last_iters << "," << horizon.size()
+            csv_plan << step << "," << plan.last_iters << "," << disk_count
                      << "," << sd_seed << "\n";
         }
         std::cout << "[PSD-DYN] Replan at k=" << step
                   << " iter=" << plan.last_iters
-                  << " disks=" << horizon.size() << "\n";
+                  << " disks=" << disk_count << "\n";
     };
 
     auto log_obstacles = [&](int step) {

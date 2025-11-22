@@ -9,9 +9,13 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless-friendly backend
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import animation
 
 PSD_CSV = "psd_dynamic_tracking.csv"
 TV_CSV = "tv_dynamic_tracking.csv"
@@ -24,6 +28,7 @@ OBSTACLE_FILES = [
 ]
 OUTPUT_FIG = "psd_dynamic_plots.png"
 COMPARE_FIG = "dynamic_compare.png"
+ANIM_OUT = "dynamic_compare.gif"
 
 
 def load_csv(path: str) -> Optional[pd.DataFrame]:
@@ -65,9 +70,9 @@ class MovingDisk:
 
 def synthesize_obstacles(max_k: int) -> pd.DataFrame:
     disks = [
-        MovingDisk(0.5, 3.0, 0.0, -0.12, 0.9, 0.15, 0.8, 0.0, 0.05, 0.6, 0.0),
-        MovingDisk(2.5, -3.5, 0.0, 0.10, 0.8, 0.12, 0.7, 1.2, 0.04, 0.7, 0.5),
-        MovingDisk(4.0, 1.5, 0.02, -0.06, 0.7, 0.1, 0.5, -0.4, 0.03, 0.5, 0.9),
+        MovingDisk(-2.5, 3.0, 0.0, -0.12, 0.9, 0.15, 0.8, 0.0, 0.05, 0.6, 0.0),
+        MovingDisk(-0.5, -3.5, 0.0, 0.10, 0.8, 0.12, 0.7, 1.2, 0.04, 0.7, 0.5),
+        MovingDisk(1.8, 1.5, 0.02, -0.06, 0.7, 0.1, 0.5, -0.4, 0.03, 0.5, 0.9),
     ]
     rows = []
     for k in range(max_k + 1):
@@ -177,6 +182,79 @@ def main() -> None:
     plt.tight_layout()
     plt.savefig(COMPARE_FIG, dpi=150, bbox_inches="tight")
     print(f"✅ Dynamic comparison saved to {COMPARE_FIG}")
+
+    # Animation setup
+    anim_fig, anim_ax = plt.subplots(figsize=(8, 6))
+    anim_ax.set_aspect("equal")
+    anim_ax.set_title("Dynamic crossing scenario")
+    anim_ax.set_xlabel("x₁")
+    anim_ax.set_ylabel("x₂")
+    anim_ax.grid(True, alpha=0.3)
+
+    color_map = {"PSD": "tab:red", "TV": "tab:green", "CBF": "tab:purple"}
+    traj_lines = {}
+    scatters = {}
+    for label, df, _, _ in data:
+        color = color_map.get(label, "black")
+        line, = anim_ax.plot([], [], color=color, linewidth=2, label=label)
+        traj_lines[label] = line
+        scatters[label] = anim_ax.scatter([], [], color=color, s=50)
+    anim_ax.legend(loc="upper left")
+
+    disk_patches = []
+    for _ in obstacle_traces:
+        patch = plt.Circle((0, 0), 0.0, color="gray", alpha=0.25)
+        anim_ax.add_patch(patch)
+        disk_patches.append(patch)
+
+    max_frames = max_k + 1
+
+    def init_anim():
+        for line in traj_lines.values():
+            line.set_data([], [])
+        for scatter in scatters.values():
+            scatter.set_offsets(np.empty((0, 2)))
+        for patch in disk_patches:
+            patch.set_radius(0.0)
+        return list(traj_lines.values()) + list(scatters.values()) + disk_patches
+
+    def update(frame):
+        for label, df, _, _ in data:
+            df_partial = df[df["k"] <= frame]
+            traj_lines[label].set_data(df_partial["x1"], df_partial["x2"])
+            if not df_partial.empty:
+                last = np.array([[df_partial["x1"].iloc[-1], df_partial["x2"].iloc[-1]]])
+                scatters[label].set_offsets(last)
+            else:
+                scatters[label].set_offsets(np.empty((0, 2)))
+        for patch, (_, trace) in zip(disk_patches, obstacle_traces.items()):
+            row = trace[trace["k"] == frame]
+            if row.empty:
+                patch.set_radius(0.0)
+            else:
+                patch.center = (row["cx"].iloc[0], row["cy"].iloc[0])
+                patch.set_radius(row["r"].iloc[0])
+        anim_ax.set_xlim(-12, 4)
+        anim_ax.set_ylim(-5, 5)
+        return list(traj_lines.values()) + list(scatters.values()) + disk_patches
+
+    anim = animation.FuncAnimation(
+        anim_fig,
+        update,
+        init_func=init_anim,
+        frames=max_frames,
+        interval=150,
+        blit=True,
+    )
+    try:
+        import PIL  # noqa: F401
+
+        anim.save(ANIM_OUT, writer="pillow", dpi=100)
+        print(f"🎞️ Animated visualization saved to {ANIM_OUT}")
+    except ImportError:
+        print("Warning: pillow not installed; skipping GIF export (pip install pillow).")
+    except Exception as exc:
+        print(f"Warning: failed to save GIF: {exc}")
 
     for label, df, _, _ in data:
         if "signed_dist" in df.columns:

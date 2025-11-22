@@ -377,6 +377,65 @@ inline int tiny_set_lifted_disks(
         tinyVector::Zero(0));
 }
 
+inline tinyVector build_lifted_disk_row(int nx0,
+                                        int nxL,
+                                        tinytype ox,
+                                        tinytype oy) {
+    tinyVector mrow = tinyVector::Zero(nxL);
+    mrow(0) = -2 * ox;
+    mrow(1) = -2 * oy;
+    const int idx_xx11 = nx0 + 0 + 0*nx0;
+    const int idx_xx22 = nx0 + 1 + 1*nx0;
+    mrow(idx_xx11) = 1;
+    mrow(idx_xx22) = 1;
+    return mrow;
+}
+
+inline int tiny_set_lifted_disks_tv(
+    TinySolver* solver,
+    const std::vector<std::vector<std::array<tinytype,3>>>& disks_per_stage)
+{
+    if (!solver) { std::cout << "tiny_set_lifted_disks_tv: solver nullptr\n"; return 1; }
+    const int nx0 = solver->settings->nx0_psd;
+    const int nxL = solver->work->nx;
+    const int N   = solver->work->N;
+    if (nx0 <= 0) { std::cout << "tiny_set_lifted_disks_tv: nx0_psd not set (>0)\n"; return 1; }
+    if (disks_per_stage.empty()) return 0;
+
+    int per_stage_rows = 0;
+    const int stages = std::min<int>(N, disks_per_stage.size());
+    for (int k = 0; k < stages; ++k) {
+        per_stage_rows = std::max(per_stage_rows,
+                                  static_cast<int>(disks_per_stage[k].size()));
+    }
+    if (per_stage_rows == 0) return 0;
+
+    tiny_enable_tv_state_linear(solver, per_stage_rows);
+    solver->settings->en_tv_state_linear = 1;
+
+    const tinytype relaxed_upper = tinytype(1e6);
+    for (int k = 0; k < N; ++k) {
+        const auto& stage_disks = (k < static_cast<int>(disks_per_stage.size()))
+                                ? disks_per_stage[k]
+                                : std::vector<std::array<tinytype,3>>{};
+        for (int j = 0; j < per_stage_rows; ++j) {
+            const int row = k * per_stage_rows + j;
+            if (j < static_cast<int>(stage_disks.size())) {
+                const auto& d = stage_disks[j];
+                tinyVector mrow = tinyVector::Zero(nxL);
+                mrow = build_lifted_disk_row(nx0, nxL, d[0], d[1]);
+                tinytype n = d[2]*d[2] - (d[0]*d[0] + d[1]*d[1]);
+                solver->work->tv_Alin_x.row(row) = (-mrow).transpose();
+                solver->work->tv_blin_x(j, k) = -n;
+            } else {
+                solver->work->tv_Alin_x.row(row).setZero();
+                solver->work->tv_blin_x(j, k) = relaxed_upper;
+            }
+        }
+    }
+    return 0;
+}
+
 // Pure-PSD variant in 3D: add lifted sphere constraints (no TV relinearization)
 // For each sphere with center o=(ox,oy,oz) and effective radius r, the constraint is:
 //   (x-o)^T(x-o) >= r^2  =>  x^T x - 2 o^T x >= r^2 - o^T o
