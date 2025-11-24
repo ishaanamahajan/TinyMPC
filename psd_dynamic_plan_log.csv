@@ -1,6 +1,5 @@
 replan_step,plan_type,iter,num_disks,min_sd_seed,min_sd_prediction
 0,psd,1000,3,2.00007,2.00007
 5,psd,1000,3,0.258234,0.258234
-10,psd,1000,3,3.29881,3.29881
-15,nominal,1000,0,3.88879,3.88879
-20,nominal,1000,0,2.81233,2.81233
+10,nominal,1000,0,3.29881,3.29881
+15,nominal,1000,0,2.83977,2.83977

@@ -141,6 +141,9 @@ def plot_tangents_snapshot(
     shade_depth = max(xmax - xmin, ymax - ymin)
     span = shade_depth
 
+    # Use the endpoint of the segment as a reference; this point must be feasible
+    # for the stage we logged. Flip the half-space so the reference lies inside.
+    ref = x_segment[1]
     for _, row in tangents.iterrows():
         a0 = row["a0"]
         a1 = row["a1"]
@@ -149,6 +152,9 @@ def plot_tangents_snapshot(
         if norm == 0:
             continue
         n_hat = np.array([a0, a1]) / norm
+        s = a0 * ref[0] + a1 * ref[1] - b
+        if s > 0:
+            n_hat = -n_hat
         d_vec = np.array([-n_hat[1], n_hat[0]])
         p = n_hat * (b / norm)
         line_pts = np.vstack(
@@ -196,21 +202,39 @@ def run_tv_dynamic() -> None:
         print("[TV] Dynamic CSVs empty; skipping dynamic tangent plot.")
         return
 
-    k_star = find_tv_dynamic_k(tv, obs)
-    xk = tv.loc[tv["k"] == k_star, ["x1", "x2"]].to_numpy().ravel()
-    xk1 = tv.loc[tv["k"] == k_star + 1, ["x1", "x2"]].to_numpy().ravel()
-    disks = obs.loc[obs["k"] == k_star + 1, ["cx", "cy", "r"]].to_numpy()
-    tan_k = tans[(tans["k"] == k_star + 1) & (tans["stage"] == 0)]
+    def save_snapshot(step_idx: int, label: str = "") -> None:
+        row0 = tv[tv["k"] == step_idx]
+        row1 = tv[tv["k"] == step_idx + 1]
+        if row0.empty or row1.empty:
+            print(f"[TV] Skipping k={step_idx}: insufficient trajectory data.")
+            return
+        # Use tangents from the solve at this outer step (k = step_idx),
+        # but measure tunnelling against the disks at k+1, which is how
+        # the segment-signed-distance is defined in the dynamic demo.
+        disks = obs.loc[obs["k"] == step_idx + 1, ["cx", "cy", "r"]].to_numpy()
+        tan_k = tans[(tans["k"] == step_idx) & (tans["stage"] == 1)]
+        if tan_k.empty:
+            tan_k = tans[(tans["k"] == step_idx) & (tans["stage"] == 0)]
+        xk = row0[["x1", "x2"]].to_numpy().ravel()
+        xk1 = row1[["x1", "x2"]].to_numpy().ravel()
+        suffix = f"_{label}" if label else ""
+        out_path = ROOT / f"tv_dynamic_tangents_k{step_idx}{suffix}.png"
+        plot_tangents_snapshot(
+            out_path,
+            disks,
+            tan_k,
+            (xk, xk1),
+            f"TV dynamic tangents @ step {step_idx}",
+        )
+        print(f"[TV] Dynamic tangent snapshot saved to {out_path.name}")
 
-    out_path = ROOT / f"tv_dynamic_tangents_k{k_star+1}.png"
-    plot_tangents_snapshot(
-        out_path,
-        disks,
-        tan_k,
-        (xk, xk1),
-        f"TV dynamic tangents @ step {k_star+1}",
-    )
-    print(f"[TV] Dynamic tangent snapshot saved to {out_path.name}")
+    targets = [0, 1, 2]
+    for step in targets:
+        save_snapshot(step)
+
+    k_star = find_tv_dynamic_k(tv, obs)
+    if k_star not in targets:
+        save_snapshot(k_star, "worst")
 
 
 def run_tv_ushape() -> None:
@@ -270,23 +294,21 @@ def plot_psd_plan_vs_exec() -> None:
         return
 
     plan_groups = {k: v for k, v in plans.groupby("replan_step")}
-    replan_steps = sorted(plan_groups.keys())
-    if not replan_steps:
-        print("[PSD] No replan steps found; skipping PSD plan plots.")
+    requested_steps = [0, 5, 10, 15]
+    available_steps = [k for k in requested_steps if k in plan_groups]
+    if not available_steps:
+        print("[PSD] Requested replan steps missing; skipping PSD plan plots.")
         return
 
     horizon = int(plans["i"].max()) if "i" in plans.columns else 45
-    total = len(replan_steps)
-    ncols = min(4, total)
-    nrows = math.ceil(total / ncols)
     fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(5 * ncols, 5 * nrows),
+        2,
+        2,
+        figsize=(10, 10),
         squeeze=False,
     )
 
-    for ax, rstep in zip(axes.flat, replan_steps):
+    for ax, rstep in zip(axes.flat, available_steps):
         plan_group = plan_groups[rstep]
         ax.set_aspect("equal")
         disks = obs.loc[obs["k"] == rstep, ["cx", "cy", "r"]].to_numpy()
@@ -300,15 +322,21 @@ def plot_psd_plan_vs_exec() -> None:
                     alpha=0.5,
                 )
 
-        ax.plot(
-            plan_group["x1"],
-            plan_group["x2"],
-            "r-",
-            label=f"Plan k={rstep}",
-        )
         seg = track[
             (track["k"] >= rstep) & (track["k"] <= rstep + horizon)
         ]
+        max_exec_k = seg["k"].max() if not seg.empty else rstep
+        exec_len = max_exec_k - rstep
+        plan_subset = plan_group[plan_group["i"] <= exec_len]
+        if plan_subset.empty:
+            plan_subset = plan_group
+
+        ax.plot(
+            plan_subset["x1"],
+            plan_subset["x2"],
+            "r-",
+            label=f"Plan k={rstep}",
+        )
         ax.plot(
             seg["x1"],
             seg["x2"],
@@ -319,9 +347,8 @@ def plot_psd_plan_vs_exec() -> None:
         ax.grid(True, alpha=0.2)
         ax.legend(fontsize=8, loc="best")
 
-    total_axes = nrows * ncols
-    for ax in axes.flat[len(replan_steps) : total_axes]:
-        ax.axis("off")
+    for ax in axes.flat[len(available_steps) :]:
+        ax.remove()
 
     fig.suptitle("PSD plan vs executed trajectories", fontsize=16)
     out_path = ROOT / "psd_plan_vs_exec_all.png"
@@ -340,4 +367,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

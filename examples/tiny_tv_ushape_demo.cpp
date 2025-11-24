@@ -146,6 +146,11 @@ extern "C" int main() {
 
     csv << "k,x1,x2,x3,x4,u1,u2,signed_dist,iter\n";
 
+    std::ofstream csv_tan("../tv_ushape_tangents.csv");
+    if (csv_tan.is_open()) {
+        csv_tan << "k,stage,disk,a0,a1,b\n";
+    }
+
     auto write_row = [&](int k, const Vec& xstate, const Vec& ustate, double sd, int iters) {
         csv << k << "," << xstate(0) << "," << xstate(1) << "," << xstate(2) << "," << xstate(3)
             << "," << ustate(0) << "," << ustate(1) << "," << sd << "," << iters << "\n";
@@ -158,6 +163,23 @@ extern "C" int main() {
         tiny_set_x0(solver, x_lift);
         tiny_solve(solver);
 
+        if (csv_tan.is_open()) {
+            const int nc      = solver->work->numtvStateLinear;
+            const int horizon = solver->work->N;
+            const int m       = static_cast<int>(disks.size());
+            const int rows_per_stage = std::min(nc, m);
+            for (int stage = 0; stage < horizon; ++stage) {
+                for (int j = 0; j < rows_per_stage; ++j) {
+                    const int row = stage * nc + j;
+                    const tinytype a0 = solver->work->tv_Alin_x(row, 0);
+                    const tinytype a1 = solver->work->tv_Alin_x(row, 1);
+                    const tinytype b  = solver->work->tv_blin_x(j, stage);
+                    csv_tan << k + 1 << "," << stage << "," << j << ","
+                            << a0 << "," << a1 << "," << b << "\n";
+                }
+            }
+        }
+
         Vec u0 = solver->solution->u.col(0).topRows(NU0);
         x_dyn = Ad * x_dyn + Bd * u0;
         double sd = signed_distance(x_dyn(0), x_dyn(1));
@@ -167,10 +189,10 @@ extern "C" int main() {
     }
 
     csv.close();
+    if (csv_tan.is_open()) csv_tan.close();
     std::cout << "[TV-U] Exported tv_ushape_trajectory.csv\n";
     std::cout << "[TV-U] Min signed distance to U-shape: " << min_sd << "\n";
 
     return 0;
 }
-
 

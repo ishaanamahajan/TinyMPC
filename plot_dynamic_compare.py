@@ -348,7 +348,7 @@ def main() -> None:
                 patch.center = (row["cx"].iloc[0], row["cy"].iloc[0])
                 patch.set_radius(row["r"].iloc[0])
         anim_ax.set_xlim(-12, 4)
-        anim_ax.set_ylim(-5, 5)
+        anim_ax.set_ylim(-7, 7)
         return list(traj_lines.values()) + list(scatters.values()) + disk_patches
 
     anim = animation.FuncAnimation(

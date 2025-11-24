@@ -242,6 +242,10 @@ extern "C" int main() {
     if (csv_obs.is_open()) {
         csv_obs << "k,disk,cx,cy,r\n";
     }
+    std::ofstream csv_tan("../tv_dynamic_tangents.csv");
+    if (csv_tan.is_open()) {
+        csv_tan << "k,stage,disk,a0,a1,b\n";
+    }
 
     const tinytype goal_pos_tol = tinytype(0.15);
     const tinytype goal_vel_tol = tinytype(0.05);
@@ -280,6 +284,24 @@ extern "C" int main() {
         tiny_set_x0(solver, build_lifted(x_dyn));
         tiny_solve(solver);
 
+        // Log tangents for this outer step and all horizon stages.
+        if (csv_tan.is_open()) {
+            const int nc      = solver->work->numtvStateLinear;
+            const int horizon = solver->work->N;
+            const int m       = static_cast<int>(disks_now.size());
+            const int rows_per_stage = std::min(nc, m);
+            for (int stage = 0; stage < horizon; ++stage) {
+                for (int j = 0; j < rows_per_stage; ++j) {
+                    const int row = stage * nc + j;
+                    const tinytype a0 = solver->work->tv_Alin_x(row, 0);
+                    const tinytype a1 = solver->work->tv_Alin_x(row, 1);
+                    const tinytype b  = solver->work->tv_blin_x(j, stage);
+                    csv_tan << k << "," << stage << "," << j << ","
+                            << a0 << "," << a1 << "," << b << "\n";
+                }
+            }
+        }
+
         Vec u0 = solver->solution->u.col(0).topRows(NU0);
         prev_state = x_dyn;
         x_dyn = Ad * x_dyn + Bd * u0;
@@ -305,10 +327,10 @@ extern "C" int main() {
 
     csv.close();
     if (csv_obs.is_open()) csv_obs.close();
+    if (csv_tan.is_open()) csv_tan.close();
 
     std::cout << "[TV-DYN] Exported tv_dynamic_tracking.csv\n";
     std::cout << "[TV-DYN] Min signed distance: " << min_sd << "\n";
     return 0;
 }
-
 

@@ -367,7 +367,7 @@ extern "C" int main() {
     const int replan_stride = 5;
     const int horizon_guard = 5;
     const double psd_on_distance = 2.5;
-    const double psd_off_distance = 3.5;
+    const double psd_off_distance = 2.5;
     bool psd_constraints_active = false;
 
     std::ofstream csv_plan("../psd_dynamic_plan_log.csv");
