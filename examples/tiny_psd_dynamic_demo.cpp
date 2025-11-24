@@ -364,7 +364,7 @@ extern "C" int main() {
     Vec x_track = x0;
 
     const int total_steps = 90;
-    const int replan_stride = 6;
+    const int replan_stride = 5;
     const tinytype prediction_inflation = tinytype(0.01);
     const int horizon_guard = 5;
     const int psd_obstacle_horizon = std::min(N, 18);
@@ -385,6 +385,32 @@ extern "C" int main() {
     }
 
     bool psd_constraints_active = false;
+    const tinytype goal_pos_tol = tinytype(0.15);
+    const tinytype goal_vel_tol = tinytype(0.05);
+
+    auto log_obstacles = [&](int step) {
+        if (!csv_obstacles.is_open()) return;
+        auto disks = obstacles.disks_at_step(step);
+        for (size_t j = 0; j < disks.size(); ++j) {
+            csv_obstacles << step << "," << j << ","
+                          << disks[j][0] << "," << disks[j][1] << "," << disks[j][2] << "\n";
+        }
+    };
+
+    auto log_tracking_row = [&](int step, const Vec& state, const Vec& input,
+                                double sd_point, double sd_segment,
+                                int plan_age, int iters) {
+        if (!csv_track.is_open()) return;
+        csv_track << step << "," << state(0) << "," << state(1) << "," << state(2) << "," << state(3)
+                  << "," << input(0) << "," << input(1) << "," << sd_point
+                  << "," << sd_segment << "," << plan_age << "," << iters << "\n";
+    };
+
+    auto goal_reached = [&](const Vec& state) -> bool {
+        tinytype pos_norm = state.topRows(2).norm();
+        tinytype vel_norm = state.bottomRows(2).norm();
+        return (pos_norm < goal_pos_tol) && (vel_norm < goal_vel_tol);
+    };
 
     auto replan_plan = [&](int step, const Vec& x_seed) {
         auto per_stage = obstacles.horizon_disks_per_stage(
@@ -435,26 +461,6 @@ extern "C" int main() {
                   << " min_sd_pred=" << min_sd_prediction << "\n";
     };
 
-    auto log_obstacles = [&](int step) {
-        if (!csv_obstacles.is_open()) return;
-        auto disks = obstacles.disks_at_step(step);
-        for (size_t j = 0; j < disks.size(); ++j) {
-            csv_obstacles << step << "," << j << ","
-                          << disks[j][0] << "," << disks[j][1] << "," << disks[j][2] << "\n";
-        }
-    };
-
-    auto log_tracking_row = [&](int step, const Vec& state, const Vec& input,
-                                double sd_point, double sd_segment,
-                                int plan_age, int iters) {
-        if (!csv_track.is_open()) return;
-        csv_track << step << "," << state(0) << "," << state(1) << "," << state(2) << "," << state(3)
-                  << "," << input(0) << "," << input(1) << "," << sd_point
-                  << "," << sd_segment << "," << plan_age << "," << iters << "\n";
-    };
-
-    replan_plan(0, x_track);
-
     auto disks_init = obstacles.disks_at_step(0);
     double sd0 = signed_distance_point_disks(x_track, disks_init);
     Vec zero_u = Vec::Zero(NU0);
@@ -462,6 +468,8 @@ extern "C" int main() {
     log_tracking_row(0, x_track, zero_u, sd0, sd0, /*plan_age=*/0, /*iters=*/0);
 
     double min_sd_track = sd0;
+
+    replan_plan(0, x_track);
 
     Vec prev_state = x_track;
     for (int k = 0; k < total_steps; ++k) {
@@ -491,6 +499,13 @@ extern "C" int main() {
         int plan_age = step_idx - plan.start_step;
         log_tracking_row(step_idx, x_track, u0, sd_point, sd_segment,
                          plan_age, solver_track->solution->iter);
+
+        if (goal_reached(x_track)) {
+            std::cout << "[PSD-DYN] Goal reached at step " << step_idx
+                      << " (pos_norm=" << x_track.topRows(2).norm()
+                      << ", vel_norm=" << x_track.bottomRows(2).norm() << ")\n";
+            break;
+        }
     }
 
     if (csv_plan.is_open()) csv_plan.close();

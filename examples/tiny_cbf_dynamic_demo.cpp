@@ -305,6 +305,8 @@ extern "C" int main() {
         csv_obs << "k,disk,cx,cy,r\n";
     }
 
+    const tinytype goal_pos_tol = tinytype(0.15);
+    const tinytype goal_vel_tol = tinytype(0.05);
     auto log_obstacles = [&](int step) {
         if (!csv_obs.is_open()) return;
         auto disks = obstacles.disks_at_step(step);
@@ -312,6 +314,12 @@ extern "C" int main() {
             csv_obs << step << "," << j << ","
                     << disks[j][0] << "," << disks[j][1] << "," << disks[j][2] << "\n";
         }
+    };
+
+    auto goal_reached = [&](const Vec& state) -> bool {
+        tinytype pos_norm = state.topRows(2).norm();
+        tinytype vel_norm = state.bottomRows(2).norm();
+        return (pos_norm < goal_pos_tol) && (vel_norm < goal_vel_tol);
     };
 
     auto disks0 = obstacles.disks_at_step(0);
@@ -404,6 +412,13 @@ extern "C" int main() {
         csv << step_idx << "," << x(0) << "," << x(1) << "," << x(2) << "," << x(3)
             << "," << u(0) << "," << u(1) << "," << sd_point << "," << sd_segment
             << "," << used_relax << "," << min_margin << "\n";
+
+        if (goal_reached(x)) {
+            std::cout << "[CBF-DYN] Goal reached at step " << step_idx
+                      << " (pos_norm=" << x.topRows(2).norm()
+                      << ", vel_norm=" << x.bottomRows(2).norm() << ")\n";
+            break;
+        }
     }
 
     csv.close();

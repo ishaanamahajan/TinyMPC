@@ -48,6 +48,87 @@ def build_obstacle_traces(df: pd.DataFrame) -> Dict[int, pd.DataFrame]:
     return traces
 
 
+def build_obstacles_by_step(df: pd.DataFrame) -> Dict[int, np.ndarray]:
+    per_step: Dict[int, np.ndarray] = {}
+    for step, group in df.groupby("k"):
+        per_step[int(step)] = group[["cx", "cy", "r"]].to_numpy(dtype=float)
+    return per_step
+
+
+def point_signed_distance(x: float, y: float, disks: np.ndarray) -> float:
+    best = np.inf
+    for cx, cy, r in disks:
+        sd = np.hypot(x - cx, y - cy) - r
+        if sd < best:
+            best = sd
+    return best
+
+
+def segment_signed_distance(p0: Tuple[float, float],
+                            p1: Tuple[float, float],
+                            disks: np.ndarray) -> float:
+    best = np.inf
+    p0_arr = np.array(p0, dtype=float)
+    p1_arr = np.array(p1, dtype=float)
+    d = p1_arr - p0_arr
+    denom = float(np.dot(d, d))
+    for cx, cy, r in disks:
+        center = np.array([cx, cy], dtype=float)
+        t = 0.0
+        if denom > 0.0:
+            t = float(np.clip(np.dot(center - p0_arr, d) / denom, 0.0, 1.0))
+        closest = p0_arr + t * d
+        sd = np.linalg.norm(closest - center) - r
+        if sd < best:
+            best = sd
+    return best
+
+
+def compute_safety_metrics(label: str,
+                           df: pd.DataFrame,
+                           obstacles_by_step: Dict[int, np.ndarray]) -> Optional[Dict[str, float]]:
+    required_cols = {"k", "x1", "x2"}
+    if not required_cols <= set(df.columns):
+        print(f"Warning: {label} data missing required columns for safety metrics.")
+        return None
+
+    df_sorted = df.sort_values("k").reset_index(drop=True)
+    point_sds: List[float] = []
+    segment_sds: List[float] = []
+    collision = False
+
+    for _, row in df_sorted.iterrows():
+        step = int(row["k"])
+        disks = obstacles_by_step.get(step)
+        if disks is None or len(disks) == 0:
+            continue
+        point_sds.append(point_signed_distance(float(row["x1"]), float(row["x2"]), disks))
+
+    for idx in range(len(df_sorted) - 1):
+        row0 = df_sorted.iloc[idx]
+        row1 = df_sorted.iloc[idx + 1]
+        step = int(row1["k"])
+        disks = obstacles_by_step.get(step)
+        if disks is None or len(disks) == 0:
+            continue
+        seg_sd = segment_signed_distance(
+            (float(row0["x1"]), float(row0["x2"])),
+            (float(row1["x1"]), float(row1["x2"])),
+            disks,
+        )
+        segment_sds.append(seg_sd)
+        if seg_sd < 0.0:
+            collision = True
+
+    metrics = {
+        "label": label,
+        "min_point_sd": float(np.min(point_sds)) if point_sds else float("nan"),
+        "min_segment_sd": float(np.min(segment_sds)) if segment_sds else float("nan"),
+        "collision": collision,
+    }
+    return metrics
+
+
 @dataclass
 class MovingDisk:
     cx0: float
@@ -112,6 +193,27 @@ def main() -> None:
 
     obs_df = load_or_synthesize_obstacles(max_k)
     obstacle_traces = build_obstacle_traces(obs_df)
+    obstacles_by_step = build_obstacles_by_step(obs_df)
+
+    safety_rows = []
+    for label, df, _, _ in data:
+        metrics = compute_safety_metrics(label, df, obstacles_by_step)
+        if metrics is not None:
+            safety_rows.append(metrics)
+
+    if safety_rows:
+        print("\n=== Safety metrics (pointwise vs segment) ===")
+        header = f"{'method':>8} | {'min point sd':>12} | {'min seg sd':>11} | collision?"
+        print(header)
+        print("-" * len(header))
+        for row in safety_rows:
+            collision_str = "yes" if row["collision"] else "no"
+            print(
+                f"{row['label']:>8} | "
+                f"{row['min_point_sd']:12.4f} | "
+                f"{row['min_segment_sd']:11.4f} | "
+                f"{collision_str}"
+            )
 
     plan_log = load_csv(PLAN_LOG_CSV)
 
@@ -153,8 +255,14 @@ def main() -> None:
     ax.set_xlabel("Step k")
     ax.set_ylabel("signed_dist")
     if plan_log is not None:
-        for _, row in plan_log.iterrows():
-            ax.axvline(row["replan_step"], color="gray", linestyle=":", alpha=0.2)
+        step_col = None
+        if "replan_step" in plan_log.columns:
+            step_col = "replan_step"
+        elif "step" in plan_log.columns:
+            step_col = "step"
+        if step_col is not None:
+            for _, row in plan_log.iterrows():
+                ax.axvline(row[step_col], color="gray", linestyle=":", alpha=0.2)
     ax.grid(True, alpha=0.3)
     ax.legend()
 

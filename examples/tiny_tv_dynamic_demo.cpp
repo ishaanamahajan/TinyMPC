@@ -243,6 +243,8 @@ extern "C" int main() {
         csv_obs << "k,disk,cx,cy,r\n";
     }
 
+    const tinytype goal_pos_tol = tinytype(0.15);
+    const tinytype goal_vel_tol = tinytype(0.05);
     auto log_obstacles = [&](int step) {
         if (!csv_obs.is_open()) return;
         auto disks = obstacles.disks_at_step(step);
@@ -250,6 +252,12 @@ extern "C" int main() {
             csv_obs << step << "," << j << ","
                     << disks[j][0] << "," << disks[j][1] << "," << disks[j][2] << "\n";
         }
+    };
+
+    auto goal_reached = [&](const Vec& state) -> bool {
+        tinytype pos_norm = state.topRows(2).norm();
+        tinytype vel_norm = state.bottomRows(2).norm();
+        return (pos_norm < goal_pos_tol) && (vel_norm < goal_vel_tol);
     };
 
     Vec x_dyn = x0;
@@ -286,6 +294,13 @@ extern "C" int main() {
         csv << step_idx << "," << x_dyn(0) << "," << x_dyn(1) << "," << x_dyn(2) << "," << x_dyn(3)
             << "," << u0(0) << "," << u0(1) << "," << sd_point << "," << sd_segment
             << "," << solver->solution->iter << "\n";
+
+        if (goal_reached(x_dyn)) {
+            std::cout << "[TV-DYN] Goal reached at step " << step_idx
+                      << " (pos_norm=" << x_dyn.topRows(2).norm()
+                      << ", vel_norm=" << x_dyn.bottomRows(2).norm() << ")\n";
+            break;
+        }
     }
 
     csv.close();
