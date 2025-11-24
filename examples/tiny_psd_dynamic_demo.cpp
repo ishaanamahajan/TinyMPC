@@ -365,11 +365,10 @@ extern "C" int main() {
 
     const int total_steps = 90;
     const int replan_stride = 5;
-    const tinytype prediction_inflation = tinytype(0.01);
     const int horizon_guard = 5;
-    const int psd_obstacle_horizon = std::min(N, 18);
     const double psd_on_distance = 2.5;
     const double psd_off_distance = 3.5;
+    bool psd_constraints_active = false;
 
     std::ofstream csv_plan("../psd_dynamic_plan_log.csv");
     if (csv_plan.is_open()) {
@@ -384,7 +383,6 @@ extern "C" int main() {
         csv_obstacles << "k,disk,cx,cy,r\n";
     }
 
-    bool psd_constraints_active = false;
     const tinytype goal_pos_tol = tinytype(0.15);
     const tinytype goal_vel_tol = tinytype(0.05);
 
@@ -413,22 +411,20 @@ extern "C" int main() {
     };
 
     auto replan_plan = [&](int step, const Vec& x_seed) {
-        auto per_stage = obstacles.horizon_disks_per_stage(
-            step, psd_obstacle_horizon, prediction_inflation);
-        double min_sd_prediction = min_prediction_signed_distance(x_seed, per_stage);
+        auto disks_now = obstacles.disks_at_step(step);
+        double min_sd = signed_distance_point_disks(x_seed, disks_now);
 
-        if (!psd_constraints_active && min_sd_prediction < psd_on_distance) {
+        if (!psd_constraints_active && min_sd < psd_on_distance) {
             psd_constraints_active = true;
-        } else if (psd_constraints_active && min_sd_prediction > psd_off_distance) {
+        } else if (psd_constraints_active && min_sd > psd_off_distance) {
             psd_constraints_active = false;
         }
 
         if (psd_constraints_active) {
             solver_psd->settings->en_psd = 1;
-            tiny_set_lifted_disks_tv(solver_psd, per_stage);
+            tiny_set_lifted_disks(solver_psd, disks_now);
         } else {
             solver_psd->settings->en_psd = 0;
-            solver_psd->settings->en_tv_state_linear = 0;
         }
 
         Vec x_lift = build_lifted(x_seed);
@@ -438,27 +434,19 @@ extern "C" int main() {
         plan.start_step = step;
         plan.mode = psd_constraints_active ? PlanMode::PSD : PlanMode::NOMINAL;
 
-        auto disks_now = obstacles.disks_at_step(step);
         double sd_seed = signed_distance_point_disks(x_seed, disks_now);
-
-        std::size_t disk_count = 0;
-        for (const auto& stage : per_stage) {
-            disk_count += stage.size();
-        }
-        if (!psd_constraints_active) {
-            disk_count = 0;
-        }
+        std::size_t disk_count = psd_constraints_active ? disks_now.size() : 0;
 
         if (csv_plan.is_open()) {
             csv_plan << step << "," << plan_mode_str(plan.mode) << ","
                      << plan.last_iters << "," << disk_count << ","
-                     << sd_seed << "," << min_sd_prediction << "\n";
+                     << sd_seed << "," << min_sd << "\n";
         }
         std::cout << "[PSD-DYN] Replan at k=" << step
                   << " mode=" << plan_mode_str(plan.mode)
                   << " iter=" << plan.last_iters
                   << " disks=" << disk_count
-                  << " min_sd_pred=" << min_sd_prediction << "\n";
+                  << " min_sd=" << min_sd << "\n";
     };
 
     auto disks_init = obstacles.disks_at_step(0);
